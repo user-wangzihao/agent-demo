@@ -35,6 +35,9 @@ public class FeatureDocumentDTO {
     /** 常见问题 */
     private SectionDTO faq;
 
+    /** 关联视频URL列表 */
+    private List<String> videoUrls;
+
     /**
      * 通用段落：描述 + 图片列表
      */

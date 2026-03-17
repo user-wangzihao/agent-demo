@@ -106,7 +106,7 @@
         <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>dashscope-sdk-java</artifactId>
-            <version>2.16.4</version>
+            <version>2.22.11</version>
         </dependency>
 
         <!-- FastJSON（Milvus SDK 需要） -->

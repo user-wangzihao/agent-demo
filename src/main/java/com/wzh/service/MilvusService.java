@@ -3,6 +3,7 @@ package com.wzh.service;
 import com.wzh.config.MilvusConfig;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
+import io.milvus.param.dml.DeleteParam;
 import io.milvus.v2.client.MilvusClientV2;
 import io.milvus.v2.common.DataType;
 import io.milvus.v2.common.IndexParam;
@@ -194,6 +195,23 @@ public class MilvusService {
             }
         }
         return results;
+    }
+
+
+    /**
+     * 删除指定文档的指定类型的 chunk
+     */
+    public void deleteByDocIdAndChunkType(Long docId, String chunkType) {
+        try {
+            String collectionName = milvusConfig.getCollectionName();
+            milvusClient.delete(DeleteReq.builder()
+                    .collectionName(collectionName)
+                    .filter(String.format("doc_id == %d and chunk_type == \"%s\"", docId, chunkType))
+                    .build());
+            log.info("已删除文档 [{}] 的 [{}] 类型 chunk", docId, chunkType);
+        } catch (Exception e) {
+            log.error("删除 chunk 失败", e);
+        }
     }
 
     // ========== 数据类 ==========

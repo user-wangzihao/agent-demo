@@ -6,6 +6,10 @@ server:
 spring:
   application:
     name: AgentDemo
+  servlet:
+    multipart:
+      max-file-size: 500MB
+      max-request-size: 600MB
 
   # 数据源配置
   datasource:
@@ -69,7 +73,7 @@ minio:
   bucket-name: agent-demo
 
 milvus:
-  host: localhost
+  host: 10.82.12.51
   port: 19530
   collection-name: feature_document_vectors
 
@@ -78,6 +82,7 @@ dashscope:
   embedding-model: text-embedding-v3
   chat-model: qwen-plus
   vision-model: qwen-vl-max
+  video-model: qwen3.5-plus
 
 # Knife4j 接口文档配置
 springdoc:

@@ -13,4 +13,5 @@ public class DashScopeConfig {
     private String embeddingModel;
     private String chatModel;
     private String visionModel;
+    private String videoModel;
 }

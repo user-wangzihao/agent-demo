@@ -42,6 +42,9 @@ public class FeatureDocument {
     /** 常见问题 JSON */
     private String faq;
 
+    /** 关联视频URL列表 JSON */
+    private String videoUrls;
+
     /** 逻辑删除 */
     @TableLogic
     private Integer deleted;

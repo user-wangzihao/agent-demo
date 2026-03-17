@@ -92,6 +92,9 @@ public class FeatureDocumentServiceImpl extends ServiceImpl<FeatureDocumentMappe
             if (dto.getFaq() != null) {
                 entity.setFaq(objectMapper.writeValueAsString(dto.getFaq()));
             }
+            if (dto.getVideoUrls() != null){
+                entity.setVideoUrls(objectMapper.writeValueAsString(dto.getVideoUrls()));
+            }
         } catch (JsonProcessingException e) {
             log.error("JSON序列化失败", e);
             throw new RuntimeException("数据转换失败");

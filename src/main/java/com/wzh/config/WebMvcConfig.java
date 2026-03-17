@@ -17,7 +17,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                 .addPathPatterns("/api/**")
                 .excludePathPatterns(
                         "/api/auth/**",    // 登录接口不拦截
-                        "/api/health"      // 健康检查不拦截
+                        "/api/health",      // 健康检查不拦截
+                        "/api/test/**"      // 测试接口不拦截
                 );
     }
 }
