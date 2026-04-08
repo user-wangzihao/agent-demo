@@ -101,3 +101,7 @@ logging:
   level:
     root: info
     com.example.agentdemo: debug
+
+ticket-system:
+  base-url: http://localhost:8081        # 工单系统地址
+  api-key: capybara        # 与工单系统 application.yml 中的 ticket.api-key 保持一致
