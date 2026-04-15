@@ -19,11 +19,11 @@ import com.wzh.mapper.ChatSessionMapper;
 import com.wzh.mapper.SysUserMapper;
 import com.wzh.service.MilvusService.ChunkData;
 import com.wzh.service.MilvusService.SearchResult;
-import com.wzh.service.TicketToolService.ToolCallResult;
+import com.wzh.common.ToolCallResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -33,7 +33,6 @@ import java.util.stream.Collectors;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AgentService {
 
     private final FeatureDocumentService featureDocumentService;
@@ -46,10 +45,36 @@ public class AgentService {
     private final SysUserMapper sysUserMapper;
     private final ObjectMapper objectMapper;
     private final FaqDocumentService faqDocumentService;
-    private final TicketToolService ticketToolService;  // 新增
+    private final TicketToolService ticketToolService;
+    private final KnowledgeToolService knowledgeToolService;
+
+    public AgentService(FeatureDocumentService featureDocumentService,
+                        DashScopeService dashScopeService,
+                        MilvusService milvusService,
+                        ImageUnderstandingService imageUnderstandingService,
+                        KnowledgeExtractService knowledgeExtractService,
+                        ChatSessionMapper chatSessionMapper,
+                        ChatMessageMapper chatMessageMapper,
+                        SysUserMapper sysUserMapper,
+                        ObjectMapper objectMapper,
+                        FaqDocumentService faqDocumentService,
+                        TicketToolService ticketToolService,
+                        @Lazy KnowledgeToolService knowledgeToolService) {
+        this.featureDocumentService = featureDocumentService;
+        this.dashScopeService = dashScopeService;
+        this.milvusService = milvusService;
+        this.imageUnderstandingService = imageUnderstandingService;
+        this.knowledgeExtractService = knowledgeExtractService;
+        this.chatSessionMapper = chatSessionMapper;
+        this.chatMessageMapper = chatMessageMapper;
+        this.sysUserMapper = sysUserMapper;
+        this.objectMapper = objectMapper;
+        this.faqDocumentService = faqDocumentService;
+        this.ticketToolService = ticketToolService;
+        this.knowledgeToolService = knowledgeToolService;
+    }
 
     // ==================== 文档学习 ====================
-    // （与原来完全相同，保持不变）
 
     public void learnDocument(Long docId) {
         FeatureDocumentDTO doc = featureDocumentService.getDocumentById(docId);
@@ -106,7 +131,6 @@ public class AgentService {
     }
 
     // ==================== FAQ 学习 ====================
-    // （与原来完全相同，保持不变）
 
     public void learnFaq(Long faqId) {
         FaqDocumentDTO faq = faqDocumentService.getFaqById(faqId);
@@ -153,13 +177,14 @@ public class AgentService {
         log.info("FAQ [{}] 学习完成，共生成 {} 个知识块", faq.getQuestion(), chunks.size());
     }
 
-    // ==================== 流式对话（核心改造：加入 Function Calling）====================
+    // ==================== 流式对话 ====================
 
     public SseEmitter chatStream(Long sessionId, String userMessage, List<String> imageUrls) {
         SseEmitter emitter = new SseEmitter(120_000L);
         Long userId = UserContext.getUserId();
+        // 在请求线程捕获 TokenInfo，传播到新线程（ThreadLocal 不跨线程）
+        com.wzh.utils.TokenUtil.TokenInfo tokenInfo = UserContext.get();
 
-        // 新建会话
         if (sessionId == null) {
             ChatSession session = new ChatSession();
             session.setUserId(userId);
@@ -169,7 +194,6 @@ public class AgentService {
         }
         final Long finalSessionId = sessionId;
 
-        // 保存用户消息
         ChatMessage userMsg = new ChatMessage();
         userMsg.setSessionId(finalSessionId);
         userMsg.setRole("user");
@@ -180,8 +204,9 @@ public class AgentService {
         chatMessageMapper.insert(userMsg);
 
         new Thread(() -> {
+            UserContext.set(tokenInfo);
             try {
-                // ===== Step 1: 多模态图片理解 =====
+                // Step 1: 多模态图片理解
                 String enhancedMessage = userMessage;
                 if (imageUrls != null && !imageUrls.isEmpty()) {
                     StringBuilder imageContext = new StringBuilder();
@@ -189,14 +214,12 @@ public class AgentService {
                         try {
                             String desc = imageUnderstandingService.analyzeUserScreenshot(imageUrl, userMessage);
                             if (StrUtil.isNotBlank(desc)) imageContext.append("【用户截图内容】").append(desc).append("\n");
-                        } catch (Exception e) {
-                            log.warn("用户截图理解失败: {}", e.getMessage());
-                        }
+                        } catch (Exception e) { log.warn("用户截图理解失败: {}", e.getMessage()); }
                     }
                     if (imageContext.length() > 0) enhancedMessage = userMessage + "\n\n" + imageContext;
                 }
 
-                // ===== Step 2: 向量检索 =====
+                // Step 2: 向量检索
                 List<Float> queryVector = dashScopeService.getEmbedding(enhancedMessage);
                 List<SearchResult> searchResults = milvusService.search(queryVector, 8);
                 List<SearchResult> processedResults = postProcessSearchResults(searchResults);
@@ -207,10 +230,7 @@ public class AgentService {
                     context.append("以下是从知识库中检索到的相关信息：\n\n");
                     int idx = 0;
                     for (SearchResult sr : processedResults) {
-                        if ("image_description".equals(sr.chunkType)) {
-                            collectImages(sr.imageUrls, relatedImages);
-                            continue;
-                        }
+                        if ("image_description".equals(sr.chunkType)) { collectImages(sr.imageUrls, relatedImages); continue; }
                         idx++;
                         context.append(String.format("【知识片段 %d】(来源: %s - %s, 相关度: %.2f)\n%s\n\n",
                                 idx, sr.featureName, sr.chunkType, sr.score, sr.content));
@@ -223,15 +243,11 @@ public class AgentService {
                         .map(sr -> { SourceInfo s = new SourceInfo(); s.featureName = sr.featureName; s.chunkType = sr.chunkType; s.score = sr.score; return s; })
                         .collect(Collectors.toList());
 
-                // ===== Step 3: 发送 meta 元数据 =====
-                String metaJson = objectMapper.writeValueAsString(Map.of(
-                        "sessionId", finalSessionId,
-                        "relatedImages", relatedImages,
-                        "sources", sources
-                ));
-                emitter.send(SseEmitter.event().name("meta").data(metaJson));
+                // Step 3: 发送 meta
+                emitter.send(SseEmitter.event().name("meta").data(objectMapper.writeValueAsString(Map.of(
+                        "sessionId", finalSessionId, "relatedImages", relatedImages, "sources", sources))));
 
-                // ===== Step 4: 加载历史对话 =====
+                // Step 4: 加载历史对话
                 List<ChatMessage> historyMessages = chatMessageMapper.selectList(
                         new LambdaQueryWrapper<ChatMessage>()
                                 .eq(ChatMessage::getSessionId, finalSessionId)
@@ -243,94 +259,85 @@ public class AgentService {
                     ChatMessage m = historyMessages.get(i);
                     chatHistory.add(Message.builder()
                             .role("user".equals(m.getRole()) ? Role.USER.getValue() : Role.ASSISTANT.getValue())
-                            .content(m.getContent())
-                            .build());
+                            .content(m.getContent()).build());
                 }
 
-                String systemPrompt = buildSystemPrompt(context.toString());
+                // Step 5: 获取当前用户信息
+                SysUser currentUser = sysUserMapper.selectById(userId);
+                String currentUserRole = currentUser != null ? currentUser.getRole() : "user";
+                String currentUserName = currentUser != null ? currentUser.getNickname() : "用户";
+                String currentUserId = currentUser != null ? currentUser.getUsername() : String.valueOf(userId);
+
+                String systemPrompt = buildSystemPrompt(context.toString(), currentUserRole);
                 final String finalEnhancedMessage = enhancedMessage;
 
-                // ===== Step 5: Function Calling 判断 =====
-                // 先用非流式调用让模型判断：需要直接回答，还是需要调用工具
+                // Step 6: Function Calling 判断
                 ToolCallResult toolCallResult = dashScopeService.chatWithTools(
-                        systemPrompt, chatHistory, finalEnhancedMessage,
-                        TicketToolService.TOOLS_SCHEMA
-                );
+                        systemPrompt, chatHistory, finalEnhancedMessage, TicketToolService.TOOLS_SCHEMA);
 
                 if (toolCallResult.isHasToolCall()) {
-                    // ===== Step 6a: 执行工具调用 =====
-                    String toolName = toolCallResult.getToolName();
-                    JsonNode args = toolCallResult.getArguments();
-                    log.info("执行工具: {}", toolName);
+                    // Step 7: 执行工具
+                    String toolResult = executeToolCall(
+                            toolCallResult.getToolName(), toolCallResult.getArguments(),
+                            finalSessionId, currentUserId, currentUserName, userMessage);
 
-                    // 获取当前用户信息
-                    SysUser currentUser = sysUserMapper.selectById(userId);
-                    String currentUserName = currentUser != null ? currentUser.getNickname() : "用户";
-                    String currentUserId = currentUser != null ? currentUser.getUsername() : String.valueOf(userId);
+                    log.info("工具 [{}] 执行结果: {}", toolCallResult.getToolName(), toolResult);
 
-                    String toolResult;
-                    if ("submitTicket".equals(toolName)) {
-                        String title = args.has("title") ? args.get("title").asText() : "用户问题";
-                        String description = args.has("description") ? args.get("description").asText() : userMessage;
-                        String priority = args.has("priority") ? args.get("priority").asText() : "NORMAL";
-
-                        toolResult = ticketToolService.submitTicket(
-                                finalSessionId, currentUserId, currentUserName,
-                                title, description, priority
-                        );
-                    } else if ("queryTicketStatus".equals(toolName)) {
-                        String ticketNo = args.has("ticketNo") ? args.get("ticketNo").asText() : "";
-                        toolResult = ticketToolService.queryTicketStatus(ticketNo);
-                    } else {
-                        toolResult = "{\"error\": \"未知工具\"}";
-                    }
-
-                    log.info("工具执行结果: {}", toolResult);
-
-                    // ===== Step 6b: 把工具结果喂回模型，流式输出最终回答 =====
+                    // Step 8: 工具结果喂回模型，流式输出
                     dashScopeService.chatStreamWithToolResult(
                             systemPrompt, chatHistory, finalEnhancedMessage,
-                            toolCallResult.getToolCallId(), toolName, toolResult,
-                            // onToken
-                            delta -> {
-                                try { emitter.send(SseEmitter.event().name("token").data(delta)); }
-                                catch (Exception e) { log.warn("SSE 发送失败", e); }
-                            },
-                            // onComplete
-                            fullContent -> saveAssistantMessageAndComplete(
-                                    emitter, finalSessionId, fullContent, relatedImages, sources, historyMessages),
-                            // onError
-                            error -> handleStreamError(emitter, error)
-                    );
-
+                            toolCallResult.getToolCallId(), toolCallResult.getToolName(), toolResult,
+                            delta -> { try { emitter.send(SseEmitter.event().name("token").data(delta)); } catch (Exception e) { log.warn("SSE 发送失败", e); } },
+                            fullContent -> saveAssistantMessageAndComplete(emitter, finalSessionId, fullContent, relatedImages, sources, historyMessages),
+                            error -> handleStreamError(emitter, error));
                 } else {
-                    // ===== Step 6c: 不需要工具调用，直接流式回答 =====
-                    dashScopeService.chatStream(
-                            systemPrompt, chatHistory, finalEnhancedMessage,
-                            delta -> {
-                                try { emitter.send(SseEmitter.event().name("token").data(delta)); }
-                                catch (Exception e) { log.warn("SSE 发送失败", e); }
-                            },
-                            fullContent -> saveAssistantMessageAndComplete(
-                                    emitter, finalSessionId, fullContent, relatedImages, sources, historyMessages),
-                            error -> handleStreamError(emitter, error)
-                    );
+                    // Step 9: 直接流式回答
+                    dashScopeService.chatStream(systemPrompt, chatHistory, finalEnhancedMessage,
+                            delta -> { try { emitter.send(SseEmitter.event().name("token").data(delta)); } catch (Exception e) { log.warn("SSE 发送失败", e); } },
+                            fullContent -> saveAssistantMessageAndComplete(emitter, finalSessionId, fullContent, relatedImages, sources, historyMessages),
+                            error -> handleStreamError(emitter, error));
                 }
 
             } catch (Exception e) {
                 log.error("Agent 对话异常", e);
-                try {
-                    emitter.send(SseEmitter.event().name("error").data(e.getMessage()));
-                    emitter.complete();
-                } catch (Exception ex) { emitter.completeWithError(ex); }
+                try { emitter.send(SseEmitter.event().name("error").data(e.getMessage())); emitter.complete(); }
+                catch (Exception ex) { emitter.completeWithError(ex); }
             }
         }).start();
 
         return emitter;
     }
 
-    // ==================== 重新生成回答 ====================
-    // （与原来相同，调用 chatStreamInternal）
+    // ==================== 工具路由 ====================
+
+    private String executeToolCall(String toolName, JsonNode args,
+                                   Long sessionId, String userId, String userName,
+                                   String originalUserMessage) {
+        return switch (toolName) {
+            case "submitTicket" -> ticketToolService.submitTicket(
+                    sessionId, userId, userName,
+                    args.has("title") ? args.get("title").asText() : "用户问题",
+                    args.has("description") ? args.get("description").asText() : originalUserMessage,
+                    args.has("priority") ? args.get("priority").asText() : "NORMAL"
+            );
+            case "queryTicketStatus" -> ticketToolService.queryTicketStatus(
+                    args.has("ticketNo") ? args.get("ticketNo").asText() : ""
+            );
+            case "listDocumentStatus" -> knowledgeToolService.listDocumentStatus();
+            case "triggerKnowledgeLearning" -> knowledgeToolService.triggerKnowledgeLearning(
+                    args.has("scope") ? args.get("scope").asText() : "all_unlearned"
+            );
+            case "analyzeUsageStats" -> knowledgeToolService.analyzeUsageStats(
+                    args.has("timeRange") ? args.get("timeRange").asText() : "this_week"
+            );
+            default -> {
+                log.warn("未知工具: {}", toolName);
+                yield "{\"error\": \"未知工具: " + toolName + "\"}";
+            }
+        };
+    }
+
+    // ==================== 重新生成 ====================
 
     public SseEmitter regenerateMessage(Long messageId) {
         ChatMessage assistantMsg = chatMessageMapper.selectById(messageId);
@@ -357,31 +364,17 @@ public class AgentService {
             } catch (Exception ignored) {}
         }
         chatMessageMapper.deleteById(messageId);
-        return chatStreamInternal(sessionId, userMsg.getContent(), imageUrls, false);
+        return chatStreamInternal(sessionId, userMsg.getContent(), imageUrls);
     }
 
-    /**
-     * 内部流式对话（重新生成时复用，逻辑与 chatStream 一致，只跳过保存用户消息）
-     */
-    private SseEmitter chatStreamInternal(Long sessionId, String userMessage, List<String> imageUrls,
-                                          boolean saveUserMessage) {
+    private SseEmitter chatStreamInternal(Long sessionId, String userMessage, List<String> imageUrls) {
         SseEmitter emitter = new SseEmitter(120_000L);
         Long userId = UserContext.getUserId();
-
-        if (saveUserMessage) {
-            ChatMessage userMsg = new ChatMessage();
-            userMsg.setSessionId(sessionId);
-            userMsg.setRole("user");
-            userMsg.setContent(userMessage);
-            if (imageUrls != null && !imageUrls.isEmpty()) {
-                try { userMsg.setUserImages(objectMapper.writeValueAsString(imageUrls)); } catch (Exception ignored) {}
-            }
-            chatMessageMapper.insert(userMsg);
-        }
-
+        com.wzh.utils.TokenUtil.TokenInfo tokenInfo = UserContext.get();
         final Long finalSessionId = sessionId;
 
         new Thread(() -> {
+            UserContext.set(tokenInfo);
             try {
                 String enhancedMessage = userMessage;
                 if (imageUrls != null && !imageUrls.isEmpty()) {
@@ -435,37 +428,25 @@ public class AgentService {
                             .content(m.getContent()).build());
                 }
 
-                String systemPrompt = buildSystemPrompt(context.toString());
+                SysUser currentUser = sysUserMapper.selectById(userId);
+                String currentUserRole = currentUser != null ? currentUser.getRole() : "user";
+                String currentUserName = currentUser != null ? currentUser.getNickname() : "用户";
+                String currentUserId = currentUser != null ? currentUser.getUsername() : String.valueOf(userId);
+
+                String systemPrompt = buildSystemPrompt(context.toString(), currentUserRole);
                 final String finalEnhancedMessage = enhancedMessage;
 
                 ToolCallResult toolCallResult = dashScopeService.chatWithTools(
                         systemPrompt, chatHistory, finalEnhancedMessage, TicketToolService.TOOLS_SCHEMA);
 
                 if (toolCallResult.isHasToolCall()) {
-                    String toolName = toolCallResult.getToolName();
-                    JsonNode args = toolCallResult.getArguments();
-
-                    SysUser currentUser = sysUserMapper.selectById(userId);
-                    String currentUserName = currentUser != null ? currentUser.getNickname() : "用户";
-                    String currentUserId = currentUser != null ? currentUser.getUsername() : String.valueOf(userId);
-
-                    String toolResult;
-                    if ("submitTicket".equals(toolName)) {
-                        toolResult = ticketToolService.submitTicket(
-                                finalSessionId, currentUserId, currentUserName,
-                                args.has("title") ? args.get("title").asText() : "用户问题",
-                                args.has("description") ? args.get("description").asText() : userMessage,
-                                args.has("priority") ? args.get("priority").asText() : "NORMAL");
-                    } else if ("queryTicketStatus".equals(toolName)) {
-                        toolResult = ticketToolService.queryTicketStatus(
-                                args.has("ticketNo") ? args.get("ticketNo").asText() : "");
-                    } else {
-                        toolResult = "{\"error\": \"未知工具\"}";
-                    }
+                    String toolResult = executeToolCall(
+                            toolCallResult.getToolName(), toolCallResult.getArguments(),
+                            finalSessionId, currentUserId, currentUserName, userMessage);
 
                     dashScopeService.chatStreamWithToolResult(
                             systemPrompt, chatHistory, finalEnhancedMessage,
-                            toolCallResult.getToolCallId(), toolName, toolResult,
+                            toolCallResult.getToolCallId(), toolCallResult.getToolName(), toolResult,
                             delta -> { try { emitter.send(SseEmitter.event().name("token").data(delta)); } catch (Exception e) { log.warn("SSE 发送失败", e); } },
                             fullContent -> saveAssistantMessageAndComplete(emitter, finalSessionId, fullContent, relatedImages, sources, historyMessages),
                             error -> handleStreamError(emitter, error));
@@ -479,6 +460,8 @@ public class AgentService {
                 log.error("Agent 对话异常", e);
                 try { emitter.send(SseEmitter.event().name("error").data(e.getMessage())); emitter.complete(); }
                 catch (Exception ex) { emitter.completeWithError(ex); }
+            } finally {
+                UserContext.clear();
             }
         }).start();
 
@@ -529,7 +512,97 @@ public class AgentService {
         return md.toString();
     }
 
-    // ==================== 私有：保存 assistant 消息并完成 SSE ====================
+    // ==================== System Prompt ====================
+
+    private String buildSystemPrompt(String retrievedContext, String userRole) {
+        boolean isAdmin = "admin".equals(userRole);
+
+        String adminToolsSection = isAdmin ? """
+                
+                === 管理员专属工具 ===
+                
+                作为管理员，你还可以使用以下工具：
+                
+                【listDocumentStatus】— 查询所有文档/视频的学习状态
+                触发时机：管理员询问"学习情况怎么样"、"哪些文档已学习/未学习"、"列出文档学习详情"、"知识库状态"等时调用。
+                返回数据处理要求（必须严格执行）：
+                - 工具返回 documents 数组和 videos 数组，必须将两个数组的每一条记录都逐条列出，不得只汇报数量
+                - 文档列表格式：序号. 【文档ID: {id}】{featureName} — {status}
+                - 视频列表格式：序号. 【视频ID: {id}】{name} — {status}（所属功能ID: {featureId}）
+                - 最后输出汇总：共 N 篇文档（已学习 X 篇，未学习 Y 篇）；共 M 个视频（已学习 A 个，未学习 B 个）
+                
+                【triggerKnowledgeLearning】— 触发知识库学习
+                触发时机：管理员说"学习所有未学习的文档"、"重新学习XX文档"、"触发学习任务"时调用。
+                - scope 参数说明：
+                  · "all_unlearned" = 学习所有未学习的内容
+                  · "doc_{id}" = 学习指定 ID 的功能文档（需先用 listDocumentStatus 获取 ID）
+                  · "video_{id}" = 学习指定 ID 的视频
+                - 学习任务是异步的，触发后立即告知用户"已触发，正在后台执行"，不要让用户等待。
+                
+                【analyzeUsageStats】— 使用情况统计分析
+                触发时机：管理员询问"本周使用情况"、"哪些用户问得最多"、"用户满意度如何"、"大屏数据"时调用。
+                - timeRange 参数：this_week（本周）/ last_week（上周）/ this_month（本月）/ last_30_days（近30天）
+                - 拿到统计数据后，用自然语言组织成一段分析报告，重点说明亮点和需要关注的问题。
+                
+                """ : "";
+
+        String basePrompt = """
+                你是一个专业的软件产品技术支持助手。你的唯一知识来源是下方提供的知识片段，你必须严格基于这些知识来回答用户的问题。
+                
+                === 工单工具使用规则 ===
+                
+                你拥有工单相关工具：submitTicket（提交工单）和 queryTicketStatus（查询工单状态）。
+                
+                【何时调用 submitTicket】
+                满足以下任一条件时调用：
+                1. 用户明确说出：「转人工」「转给技术人员」「提交工单」「人工处理」等
+                2. 知识库完全没有相关信息，且用户的问题是具体的功能故障或异常
+                调用前先向用户确认：「好的，我来帮您提交工单，请稍候。」
+                调用成功后告知工单编号并提示可查询进度。
+                
+                【何时调用 queryTicketStatus】
+                用户提到工单编号并询问进度时调用，例如：「我的 TK-xxx 处理得怎么样了？」
+                
+                【不要滥用工具】
+                - 知识库有答案时，直接回答，不要提交工单
+                - 不要在没有工单编号的情况下调用 queryTicketStatus
+                
+                """ + adminToolsSection + """
+                === 回答规则 ===
+                
+                【规则一：忠于知识库】
+                回答必须以知识片段中的信息为准，严禁根据通用知识自行推测、编造答案。
+                
+                【规则二：按问题类型回答】
+                1) 报错/故障排查类 → 直接给出原因 + 解决方法
+                2) 操作步骤类 → 精简编号步骤 + 前置条件
+                3) 功能介绍类 → 2-3句话概括用途和核心能力
+                
+                【规则三：控制回答长度】
+                回答控制在300字以内，最长不超过500字。
+                
+                【规则四：格式规范】
+                使用 Markdown 格式，善用**加粗**、有序列表等。
+                
+                【规则五：信息不足时的处理】
+                知识库没有相关信息时，主动询问用户是否需要提交工单：
+                「关于这个问题，我目前的知识库暂未覆盖完整答案。需要我帮您提交工单，让技术人员进一步协助吗？」
+                
+                【规则六：引用来源】
+                回答末尾标注：（参考：XX功能-XX板块）
+                
+                使用中文回答。
+                
+                """;
+
+        if (StrUtil.isNotBlank(retrievedContext)) {
+            return basePrompt + retrievedContext;
+        } else {
+            return basePrompt + "当前知识库中没有检索到相关信息。\n";
+        }
+    }
+
+    // ==================== 私有辅助方法 ====================
 
     private void saveAssistantMessageAndComplete(SseEmitter emitter, Long sessionId, String fullContent,
                                                  List<String> relatedImages, List<SourceInfo> sources,
@@ -543,7 +616,6 @@ public class AgentService {
             assistantMsg.setSources(objectMapper.writeValueAsString(sources));
             chatMessageMapper.insert(assistantMsg);
 
-            // 首次对话自动生成标题
             if (historyMessages.size() <= 1) {
                 ChatSession titleUpdate = new ChatSession();
                 titleUpdate.setId(sessionId);
@@ -573,12 +645,8 @@ public class AgentService {
         } catch (Exception ex) { emitter.completeWithError(ex); }
     }
 
-    // ==================== 检索后处理 ====================
-    // （与原来完全相同）
-
     private List<SearchResult> postProcessSearchResults(List<SearchResult> rawResults) {
         if (rawResults == null || rawResults.isEmpty()) return new ArrayList<>();
-
         List<SearchResult> filtered = rawResults.stream().filter(sr -> sr.score >= 0.5f).collect(Collectors.toList());
         if (filtered.isEmpty()) filtered = rawResults.stream().filter(sr -> sr.score >= 0.3f).collect(Collectors.toList());
         if (filtered.isEmpty()) return new ArrayList<>();
@@ -608,9 +676,6 @@ public class AgentService {
         finalResults.addAll(imageResults);
         return finalResults;
     }
-
-    // ==================== 方案一：板块摘要与交叉引用 ====================
-    // （与原来完全相同）
 
     private Map<String, String> extractSectionSummaries(FeatureDocumentDTO doc) {
         Map<String, String> summaries = new LinkedHashMap<>();
@@ -671,9 +736,6 @@ public class AgentService {
         return sb.toString();
     }
 
-    // ==================== 方案二：关联 Chunk ====================
-    // （与原来完全相同）
-
     private List<ChunkData> buildKnowledgeChunks(Long docId, String featureName, FeatureDocumentDTO doc) {
         List<ChunkData> knowledgeChunks = new ArrayList<>();
         StringBuilder fullText = new StringBuilder();
@@ -720,8 +782,6 @@ public class AgentService {
         return "error_solution".equals(chunkType) || "prerequisite".equals(chunkType)
                 || "caution".equals(chunkType) || "dependency".equals(chunkType);
     }
-
-    // ==================== 辅助方法 ====================
 
     private ChunkData buildChunk(Long docId, String featureName, String chunkType, String subTitle,
                                  String description, List<String> images, String crossReference) {
@@ -781,67 +841,6 @@ public class AgentService {
             for (String url : str.split(",")) { String t = url.trim(); if (!t.isEmpty() && !target.contains(t)) target.add(t); }
         }
     }
-
-    // ==================== System Prompt（新增工具调用指引）====================
-
-    private String buildSystemPrompt(String retrievedContext) {
-        String basePrompt = """
-                你是一个专业的软件产品技术支持助手。你的唯一知识来源是下方提供的知识片段，你必须严格基于这些知识来回答用户的问题。
-                
-                === 工单工具使用规则（优先级最高）===
-                
-                你拥有两个工具：submitTicket（提交工单）和 queryTicketStatus（查询工单状态）。
-                
-                【何时调用 submitTicket】
-                满足以下任一条件时，调用此工具：
-                1. 用户明确说出以下意图：「转人工」「转给技术人员」「提交工单」「人工处理」「你解决不了」等
-                2. 知识库完全没有相关信息（当前知识片段为空），且用户的问题是具体的功能故障或异常
-                
-                ⚠️ 注意：调用前必须先用一句话向用户确认，例如：「好的，我来帮您提交工单，请稍候。」，然后再调用工具。
-                调用成功后，告知用户工单编号，并提示可以通过工单编号查询进度。
-                
-                【何时调用 queryTicketStatus】
-                用户提到工单编号并询问进度、结果时调用，例如：「我的 TK-xxx 处理得怎么样了？」
-                
-                【不要滥用工具】
-                - 知识库有答案时，直接回答，不要提交工单
-                - 不要在没有工单编号的情况下调用 queryTicketStatus
-                
-                === 回答规则 ===
-                
-                【规则一：忠于知识库】
-                回答必须以知识片段中的信息为准，严禁根据通用知识自行推测、编造答案。
-                
-                【规则二：按问题类型回答】
-                1) 报错/故障排查类 → 直接给出原因 + 解决方法，不绕弯子
-                2) 操作步骤类 → 精简编号步骤 + 前置条件
-                3) 功能介绍类 → 2-3句话概括用途和核心能力
-                
-                【规则三：控制回答长度】
-                回答控制在300字以内，最长不超过500字。宁可简短精准，不要冗长啰嗦。
-                
-                【规则四：格式规范】
-                使用 Markdown 格式，善用**加粗**、有序列表等。
-                
-                【规则五：信息不足时的处理】
-                如果知识库没有相关信息，先回答能回答的部分，然后主动询问用户是否需要提交工单转给技术人员处理：
-                「关于这个问题，我目前的知识库暂未覆盖完整答案。需要我帮您提交工单，让技术人员进一步协助吗？」
-                
-                【规则六：引用来源】
-                回答末尾标注：（参考：XX功能-XX板块）
-                
-                使用中文回答。
-                
-                """;
-
-        if (StrUtil.isNotBlank(retrievedContext)) {
-            return basePrompt + retrievedContext;
-        } else {
-            return basePrompt + "当前知识库中没有检索到相关信息。\n";
-        }
-    }
-
-    // ==================== 数据类 ====================
 
     @Data
     public static class SourceInfo {

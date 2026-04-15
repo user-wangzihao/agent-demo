@@ -11,7 +11,6 @@ import com.wzh.config.DashScopeConfig;
 import com.wzh.entity.FeatureDocument;
 import com.wzh.entity.VideoDocument;
 import lombok.RequiredArgsConstructor;
-import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -133,6 +132,42 @@ public class VideoLearnService {
         milvusService.insertChunks(chunks);
 
         log.info("视频 [{}] 入库完成，共生成 {} 个知识块", video.getOriginalName(), chunks.size());
+    }
+
+    /**
+     * 按视频 ID 学习单个视频（供 KnowledgeToolService 的 Agent 工具调用）
+     * 同步执行，调用方自行决定是否异步包裹（KnowledgeToolService 用 CompletableFuture 包裹）
+     */
+    public void learnVideoById(Long videoId) {
+        VideoDocument video = videoDocumentService.getById(videoId);
+        if (video == null || video.getDeleted() == 1) {
+            throw new RuntimeException("视频不存在或已删除 (id=" + videoId + ")");
+        }
+
+        // 获取关联功能名称
+        Long featureId = video.getFeatureId();
+        String featureName = "未知功能";
+        if (featureId != null) {
+            FeatureDocument featureDoc = featureDocumentService.getById(featureId);
+            if (featureDoc != null) featureName = featureDoc.getFeatureName();
+        }
+
+        // 更新状态为学习中
+        video.setLearnStatus(1);
+        videoDocumentService.updateById(video);
+
+        try {
+            learnSingleVideo(video, featureId != null ? featureId : videoId, featureName);
+            // 更新状态为已学习
+            video.setLearnStatus(2);
+            videoDocumentService.updateById(video);
+            log.info("视频 [{}] (id={}) 学习完成", video.getOriginalName(), videoId);
+        } catch (Exception e) {
+            video.setLearnStatus(3);
+            videoDocumentService.updateById(video);
+            log.error("视频 [{}] (id={}) 学习失败: {}", video.getOriginalName(), videoId, e.getMessage());
+            throw new RuntimeException("视频学习失败: " + e.getMessage(), e);
+        }
     }
 
     /**
