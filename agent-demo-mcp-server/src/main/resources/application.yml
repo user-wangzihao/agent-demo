@@ -1,0 +1,73 @@
+server:
+  port: 9527
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: agent-demo-mcp-server
+
+  # ============ MyBatis-Plus 使用的 DataSource ============
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://36.150.236.251:3306/agent_demo?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+    type: com.alibaba.druid.pool.DruidDataSource
+    druid:
+      initial-size: 3
+      min-idle: 3
+      max-active: 10
+      validation-query: SELECT 1
+
+  # ============ Spring AI MCP Server 配置 ============
+  ai:
+    mcp:
+      server:
+        # MCP Server 名称和版本，客户端会看到这些信息
+        name: agent-demo-mcp-server
+        version: 1.0.0
+        # 使用 SYNC 模式（与 Spring MVC 的同步模型匹配；若用 WebFlux 则改 ASYNC）
+        type: SYNC
+        # 启用 tool 能力，禁用 resource / prompt / completion（我们暂时只用 tool）
+        capabilities:
+          tool: true
+          resource: false
+          prompt: false
+          completion: false
+        # SSE 端点路径（客户端连这个地址）
+        sse-message-endpoint: /mcp/message
+        sse-endpoint: /sse
+        annotation-scanner:
+          enabled: true
+
+# ============ MyBatis-Plus ============
+mybatis-plus:
+  mapper-locations: classpath*:mapper/*.xml
+  type-aliases-package: com.wzh.agentdemo.common.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+      id-type: auto
+
+# ============ 主应用回调地址 ============
+main-app:
+  base-url: http://localhost:9999
+  internal-api-key: internal-secret-key-change-me
+
+# ============ 工单系统地址 ============
+ticket-system:
+  base-url: http://localhost:8081
+  api-key: capybara
+
+# ============ 日志 ============
+logging:
+  level:
+    root: info
+    com.wzh.agentdemo: debug
+    org.springframework.ai.mcp: info
