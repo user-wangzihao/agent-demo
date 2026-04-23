@@ -16,7 +16,6 @@ import java.util.Map;
 
 /**
  * 调用外部工单系统（TicketSystem）。
- *
  * TicketSystem 实际接口路径：
  *   POST /api/ticket/create            创建工单
  *   GET  /api/ticket/status/{ticketNo} 查询工单

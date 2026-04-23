@@ -8,7 +8,6 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * 把 @Tool 方法注册为 ToolCallbackProvider。
- *
  * 注意：
  * - KnowledgeTools 使用 Spring AI 主库的 @Tool 注解，通过本 Bean 注册。
  * - TicketTools 使用社区的 @McpTool 注解（支持 McpMeta 透传），

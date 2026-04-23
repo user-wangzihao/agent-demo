@@ -215,7 +215,7 @@ public class AgentService {
                             if (StrUtil.isNotBlank(desc)) imageContext.append("【用户截图内容】").append(desc).append("\n");
                         } catch (Exception e) { log.warn("用户截图理解失败: {}", e.getMessage()); }
                     }
-                    if (imageContext.length() > 0) enhancedMessage = userMessage + "\n\n" + imageContext;
+                    if (!imageContext.isEmpty()) enhancedMessage = userMessage + "\n\n" + imageContext;
                 }
 
                 // Step 2: 向量检索
@@ -334,7 +334,7 @@ public class AgentService {
                             if (StrUtil.isNotBlank(desc)) imageContext.append("【用户截图内容】").append(desc).append("\n");
                         } catch (Exception e) { log.warn("用户截图理解失败: {}", e.getMessage()); }
                     }
-                    if (imageContext.length() > 0) enhancedMessage = userMessage + "\n\n" + imageContext;
+                    if (!imageContext.isEmpty()) enhancedMessage = userMessage + "\n\n" + imageContext;
                 }
 
                 List<Float> queryVector = dashScopeService.getEmbedding(enhancedMessage);
@@ -642,7 +642,7 @@ public class AgentService {
     private List<SearchResult> postProcessSearchResults(List<SearchResult> rawResults) {
         if (rawResults == null || rawResults.isEmpty()) return new ArrayList<>();
         List<SearchResult> filtered = rawResults.stream().filter(sr -> sr.score >= 0.5f).collect(Collectors.toList());
-        if (filtered.isEmpty()) filtered = rawResults.stream().filter(sr -> sr.score >= 0.3f).collect(Collectors.toList());
+        if (filtered.isEmpty()) filtered = rawResults.stream().filter(sr -> sr.score >= 0.3f).toList();
         if (filtered.isEmpty()) return new ArrayList<>();
 
         List<SearchResult> knowledgeResults = new ArrayList<>(), textResults = new ArrayList<>(), imageResults = new ArrayList<>();
@@ -688,7 +688,7 @@ public class AgentService {
                     }
                 }
             }
-            if (sb.length() > 0) summaries.put("feature_detail", "功能要点: " + sb.toString().trim());
+            if (!sb.isEmpty()) summaries.put("feature_detail", "功能要点: " + sb.toString().trim());
         }
         if (doc.getOperationGuide() != null && StrUtil.isNotBlank(doc.getOperationGuide().getDescription())) {
             List<String> kp = extractKeyPoints(doc.getOperationGuide().getDescription());
@@ -724,7 +724,7 @@ public class AgentService {
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> e : sectionSummaries.entrySet()) {
             if (e.getKey().equals(currentSection)) continue;
-            if (sb.length() == 0) sb.append("\n\n--- 相关信息（来自同一功能的其他板块） ---\n");
+            if (sb.isEmpty()) sb.append("\n\n--- 相关信息（来自同一功能的其他板块） ---\n");
             sb.append(e.getValue()).append("\n");
         }
         return sb.toString();
