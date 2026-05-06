@@ -97,6 +97,80 @@ public class DashScopeService {
         }
     }
 
+    // ==================== 一次性 LLM 调用（用于改写、意图识别等工具型场景）====================
+
+    /**
+     * 一次性、非流式 LLM 调用。
+     *
+     * <p>与 {@link #chatStream} 的对话主流程隔离：不带历史、不开工具、低温度、非流式、低 maxTokens。
+     * 典型用途：query 改写、意图识别、JSON 输出、轻量分类等需要"稳定确定性输出"的场景。</p>
+     *
+     * <p><b>失败策略</b>: 抛 RuntimeException,由调用方捕获并决定降级
+     * (与 {@link #getEmbeddings} 风格一致)。</p>
+     *
+     * @param model        模型名;为 null 或空字符串时用配置默认 chatModel (qwen-plus)
+     * @param systemPrompt 系统提示词;允许为 null 表示不传 system 消息
+     * @param userPrompt   用户内容;不能为空
+     * @param temperature  温度,建议 0.1-0.3 (确定性场景);范围 0.0-2.0
+     * @param maxTokens    最大生成 token 数,建议根据任务设定 (改写 ~200,JSON 输出 ~500)
+     * @return LLM 返回的纯文本内容
+     * @throws RuntimeException 调用失败 (网络异常、API 错误、空响应等)
+     */
+    public String chatOnce(String model, String systemPrompt, String userPrompt,
+                           float temperature, int maxTokens) {
+        if (userPrompt == null || userPrompt.trim().isEmpty()) {
+            throw new IllegalArgumentException("userPrompt 不能为空");
+        }
+        String actualModel = (model == null || model.trim().isEmpty())
+                ? dashScopeConfig.getChatModel() : model;
+
+        long start = System.currentTimeMillis();
+        try {
+            // 构造消息: system (可选) + user
+            List<Message> messages = new ArrayList<>();
+            if (systemPrompt != null && !systemPrompt.isEmpty()) {
+                messages.add(Message.builder().role(Role.SYSTEM.getValue()).content(systemPrompt).build());
+            }
+            messages.add(Message.builder().role(Role.USER.getValue()).content(userPrompt).build());
+
+            GenerationParam param = GenerationParam.builder()
+                    .apiKey(dashScopeConfig.getApiKey())
+                    .model(actualModel)
+                    .messages(messages)
+                    .resultFormat(GenerationParam.ResultFormat.MESSAGE)
+                    .temperature(temperature)
+                    .maxTokens(maxTokens)
+                    // 不开 incrementalOutput,一次性返回
+                    .build();
+
+            Generation generation = new Generation();
+            GenerationResult result = generation.call(param);
+
+            if (result == null || result.getOutput() == null
+                    || result.getOutput().getChoices() == null
+                    || result.getOutput().getChoices().isEmpty()) {
+                throw new RuntimeException("LLM 返回空响应 model=" + actualModel);
+            }
+
+            String content = result.getOutput().getChoices().get(0).getMessage().getContent();
+            long latency = System.currentTimeMillis() - start;
+            log.info("[CHAT-ONCE] model={} temp={} maxTokens={} latency={}ms inputLen={} outputLen={}",
+                    actualModel, temperature, maxTokens, latency,
+                    userPrompt.length(), content == null ? 0 : content.length());
+            return content == null ? "" : content;
+
+        } catch (RuntimeException e) {
+            long latency = System.currentTimeMillis() - start;
+            log.error("[CHAT-ONCE] 调用失败 model={} latency={}ms err={}",
+                    actualModel, latency, e.getMessage());
+            throw e;
+        } catch (Exception e) {
+            long latency = System.currentTimeMillis() - start;
+            log.error("[CHAT-ONCE] 调用异常 model={} latency={}ms", actualModel, latency, e);
+            throw new RuntimeException("LLM 一次性调用失败: " + e.getMessage(), e);
+        }
+    }
+
     // ==================== Function Calling 第一步：工具判断（非流式）====================
 
     /**

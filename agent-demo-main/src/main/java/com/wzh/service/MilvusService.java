@@ -197,6 +197,94 @@ public class MilvusService {
         return results;
     }
 
+    /**
+     * 按 feature_name 过滤的向量相似度搜索.
+     *
+     * <p>用于"功能识别 + 检索"流水线: LLM 先识别 query 涉及的功能点,
+     * 然后只在该功能点对应的 chunk 范围内搜索,避免被无关功能的 chunk 干扰.</p>
+     *
+     * <p><b>过滤策略</b>: 用 Milvus 的 {@code feature_name in [...]} 标量过滤,
+     * 数据库层面就排除掉非目标 feature 的向量,效率高于"先全库检索再过滤".</p>
+     *
+     * <p><b>边界情况</b>:
+     * <ul>
+     *   <li>features 为 null 或空 → 退化为全库检索 (等同于 search())</li>
+     *   <li>features 中含 null/空字符串 → 自动过滤,避免拼出无效 expr</li>
+     *   <li>过滤后无任何 chunk 命中 → 返回空 List (调用方决定是否降级)</li>
+     * </ul></p>
+     *
+     * @param queryVector 查询向量
+     * @param features    要过滤的 feature_name 列表 (1-N 个);null/空 = 不过滤
+     * @param topK        返回的最相似结果数量
+     * @return 搜索结果列表
+     */
+    public List<SearchResult> searchByFeatures(List<Float> queryVector,
+                                               List<String> features,
+                                               int topK) {
+        String collectionName = milvusConfig.getCollectionName();
+
+        SearchReq.SearchReqBuilder<?, ?> builder = SearchReq.builder()
+                .collectionName(collectionName)
+                .data(Collections.singletonList(queryVector))
+                .topK(topK)
+                .outputFields(Arrays.asList("chunk_id", "doc_id", "chunk_type",
+                        "feature_name", "content", "image_urls"));
+
+        // 拼过滤表达式 (features 非空时启用)
+        String filterExpr = buildFeatureFilterExpr(features);
+        if (filterExpr != null) {
+            builder.filter(filterExpr);
+            log.info("[MILVUS-SEARCH] 启用 feature 过滤 expr={} topK={}", filterExpr, topK);
+        } else {
+            log.info("[MILVUS-SEARCH] 无 feature 过滤,全库检索 topK={}", topK);
+        }
+
+        SearchResp searchResp = milvusClient.search(builder.build());
+
+        List<SearchResult> results = new ArrayList<>();
+        List<List<SearchResp.SearchResult>> searchResults = searchResp.getSearchResults();
+        if (searchResults != null && !searchResults.isEmpty()) {
+            for (SearchResp.SearchResult item : searchResults.get(0)) {
+                SearchResult sr = new SearchResult();
+                Map<String, Object> entity = item.getEntity();
+                sr.chunkId = String.valueOf(entity.get("chunk_id"));
+                sr.docId = Long.parseLong(String.valueOf(entity.get("doc_id")));
+                sr.chunkType = String.valueOf(entity.get("chunk_type"));
+                sr.featureName = String.valueOf(entity.get("feature_name"));
+                sr.content = String.valueOf(entity.get("content"));
+                sr.imageUrls = String.valueOf(entity.get("image_urls"));
+                sr.score = item.getDistance();
+                results.add(sr);
+            }
+        }
+        return results;
+    }
+
+    /**
+     * 构造 Milvus feature_name 过滤表达式.
+     *
+     * <p>例: {@code ["快速涂色", "BOM工具"]} → {@code feature_name in ["快速涂色","BOM工具"]}</p>
+     *
+     * <p><b>注意</b>: Milvus 表达式语法对中文 VarChar 用双引号包裹,
+     * 内容里的双引号需转义 (理论上 feature_name 不会含双引号,做防御).</p>
+     *
+     * @return 表达式字符串;features 为空或全是无效项时返回 null
+     */
+    private String buildFeatureFilterExpr(List<String> features) {
+        if (features == null || features.isEmpty()) {
+            return null;
+        }
+        // 过滤掉 null / 空 / 全空白
+        List<String> valid = features.stream()
+                .filter(f -> f != null && !f.trim().isEmpty())
+                .map(f -> "\"" + f.replace("\"", "\\\"") + "\"")  // 转义内层双引号
+                .toList();
+        if (valid.isEmpty()) {
+            return null;
+        }
+        return "feature_name in [" + String.join(",", valid) + "]";
+    }
+
 
     /**
      * 删除指定文档的指定类型的 chunk

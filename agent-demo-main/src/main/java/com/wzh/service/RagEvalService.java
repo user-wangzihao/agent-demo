@@ -16,11 +16,7 @@ import org.springframework.stereotype.Service;
  
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
  
 /**
@@ -115,7 +111,14 @@ public class RagEvalService {
         try {
             // top-K 取 Math.max(topK, MRR_K) 以确保 MRR@5 能正确计算
             int actualTopK = Math.max(topK, MRR_K);
-            retrieved = ragEvalAgentService.retrieve(evalSet.getQuery(), pipeline, actualTopK);
+            // 从评估记录读出 sub_category(= feature_name),传给 feature_aware pipeline
+            // 兼容: sub_category 可能是单值或逗号分隔的多值
+            List<String> features = parseFeatures(evalSet.getSubCategory());
+            retrieved = ragEvalAgentService.retrieve(evalSet.getQuery(), pipeline, actualTopK, features);
+            // 防御性截断:不管 pipeline 返回多少条,评估只看 topK
+            if (retrieved.size() > topK) {
+                retrieved = retrieved.subList(0, topK);
+            }
         } catch (Exception e) {
             log.error("[RAG-EVAL] 检索异常 evalId={} query={}",
                     evalSet.getId(), evalSet.getQuery(), e);
@@ -146,6 +149,31 @@ public class RagEvalService {
                 .rr(rr)
                 .latencyMs(latency)
                 .build();
+    }
+
+    /**
+     * 解析评估记录的 sub_category 字段为 feature 列表.
+     *
+     * <p><b>兼容设计</b>: 当前 sub_category 是单值 VARCHAR,但预留多值扩展能力 —
+     * 后续若一条记录需要对应多个 feature,在 sub_category 里用英文逗号分隔即可,
+     * 代码无需改动.</p>
+     *
+     * @param subCategory 评估记录的 sub_category 原始值
+     * @return feature 列表;为空/null 时返回空 List
+     */
+    private List<String> parseFeatures(String subCategory) {
+        if (subCategory == null || subCategory.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        // 单值 (大多数情况) 走这条 fast path,避免无谓的 split
+        if (!subCategory.contains(",")) {
+            return Collections.singletonList(subCategory.trim());
+        }
+        // 多值: 逗号分隔,trim 每项,过滤空字符串
+        return Arrays.stream(subCategory.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toList());
     }
  
     // =========================================================================

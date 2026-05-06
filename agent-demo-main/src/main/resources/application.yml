@@ -128,3 +128,45 @@ ticket-system:
 
 internal:
   api-key: internal-secret-key-change-me   # 必须和 mcp-server 的 main-app.internal-api-key 保持一致
+
+rag:
+  rerank:
+    # 是否启用 reranker (评估接口可手动选 baseline 或 reranker,这里只是开关默认值)
+    enabled: true
+    # 模型: gte-rerank-v2 (推荐,中英文,relevance_score 区分度好)
+    #       qwen3-rerank (新版,质量略好但价格略高)
+    model: gte-rerank-v2
+    # API 端点
+    endpoint: https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank
+    # 粗召回 top-K (送给 reranker 的候选数)
+    recall-top-k: 20
+    # 精排后保留 top-N
+    rerank-top-n: 5
+    # 单条文档截断长度 (字符数,API 限制 4000 token,中文按 1.5 倍预留)
+    max-doc-chars: 2500
+    # HTTP 超时
+    connect-timeout-ms: 3000
+    read-timeout-ms: 8000
+    # 失败时是否降级到 baseline (强烈建议 true)
+    fallback-on-error: true
+  rewrite:
+    # 是否启用 query 改写
+    enabled: true
+    # 改写模型 (qwen-turbo 速度优先,qwen-plus 质量更好但更贵)
+    model: qwen-turbo
+    # 生成几条改写 (不含原 query;总检索路数 = num + 1)
+    num-rewrites: 2
+    # LLM 温度 — 改写是确定性场景,设低一点
+    temperature: 0.3
+    # LLM 输出最大 token
+    max-tokens: 200
+    # LLM 调用超时
+    timeout-ms: 5000
+    # 单路检索的 top-K
+    recall-top-k: 15
+    # RRF 融合参数 (业界标准 60)
+    rrf-k: 60
+    # 失败时降级到 baseline (强烈建议 true)
+    fallback-on-error: true
+    # 并行检索线程池大小
+    thread-pool-size: 4
