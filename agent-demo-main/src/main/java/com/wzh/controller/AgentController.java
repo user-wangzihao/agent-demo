@@ -39,7 +39,11 @@ public class AgentController {
     @Operation(summary = "流式智能对话（SSE）- 支持图片上传")
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(@RequestBody ChatRequest request) {
-        return agentService.chatStream(request.getSessionId(), request.getMessage(), request.getImageUrls());
+        return agentService.chatStream(
+                request.getSessionId(),
+                request.getMessage(),
+                request.getImageUrls(),
+                request.getSelectedFeatureName());
     }
 
     @Operation(summary = "重新生成回答")

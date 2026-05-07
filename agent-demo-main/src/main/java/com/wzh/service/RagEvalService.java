@@ -46,6 +46,10 @@ public class RagEvalService {
     private static final int HIT_K = 3;
     /** MRR@K 中的 K */
     private static final int MRR_K = 5;
+    /** NDCG@K 中的 K */
+    private static final int NDCG_K = 5;
+    /** log2(2) 缓存,避免重复计算 */
+    private static final double LOG_2 = Math.log(2);
  
     /**
      * 跑一次评估
@@ -73,21 +77,22 @@ public class RagEvalService {
             details.add(detail);
             totalLatency += (detail.getLatencyMs() == null ? 0 : detail.getLatencyMs());
         }
- 
+
         // 3. 聚合指标
         int hitCount = (int) details.stream()
                 .filter(d -> Boolean.TRUE.equals(d.getHit())).count();
         BigDecimal hitAt3 = computeHitAtK(details, HIT_K);
         BigDecimal mrrAt5 = computeMrrAtK(details, MRR_K);
+        BigDecimal ndcgAt5 = computeNdcgAtK(details, NDCG_K);
         int avgLatency = details.isEmpty() ? 0 : (int) (totalLatency / details.size());
- 
+
         // 4. 持久化
-        Long runId = saveRunRecord(pipeline, details.size(), hitAt3, mrrAt5, avgLatency,
-                details, topK);
- 
-        log.info("[RAG-EVAL] 评估完成 pipeline={} Hit@3={} MRR@5={} avgLatency={}ms hitCount={}/{}",
-                pipeline, hitAt3, mrrAt5, avgLatency, hitCount, details.size());
- 
+        Long runId = saveRunRecord(pipeline, details.size(), hitAt3, mrrAt5, ndcgAt5,
+                avgLatency, details, topK);
+
+        log.info("[RAG-EVAL] 评估完成 pipeline={} Hit@3={} MRR@5={} NDCG@5={} avgLatency={}ms hitCount={}/{}",
+                pipeline, hitAt3, mrrAt5, ndcgAt5, avgLatency, hitCount, details.size());
+
         return RagEvalRunResponse.builder()
                 .runId(runId)
                 .pipeline(pipeline)
@@ -95,6 +100,7 @@ public class RagEvalService {
                 .hitCount(hitCount)
                 .hitAt3(hitAt3)
                 .mrrAt5(mrrAt5)
+                .ndcgAt5(ndcgAt5)
                 .avgLatencyMs(avgLatency)
                 .details(details)
                 .build();
@@ -202,6 +208,54 @@ public class RagEvalService {
         return BigDecimal.valueOf(sum / details.size())
                 .setScale(4, RoundingMode.HALF_UP);
     }
+
+    /**
+     * NDCG@K = 平均(DCG@K / IDCG@K)
+     *
+     * <p>采用二元相关性: 命中 rel=1, 未命中 rel=0.
+     * DCG@K  = Σ (rel_i / log2(i+1))         i ∈ [1, K]
+     * IDCG@K = Σ (1 / log2(i+1))              i ∈ [1, min(K, |expected|)]
+     * 当 expected 为空时,该条记 0 (无理想排序可参考).</p>
+     */
+    private BigDecimal computeNdcgAtK(List<RagEvalDetail> details, int k) {
+        if (details.isEmpty()) return BigDecimal.ZERO;
+        double sum = 0.0;
+        for (RagEvalDetail d : details) {
+            sum += singleNdcg(d, k);
+        }
+        return BigDecimal.valueOf(sum / details.size())
+                .setScale(4, RoundingMode.HALF_UP);
+    }
+
+    /** 计算单条 NDCG@K */
+    private double singleNdcg(RagEvalDetail d, int k) {
+        List<String> retrieved = d.getRetrievedChunks();
+        List<String> expectedList = d.getExpectedChunks();
+        if (retrieved == null || retrieved.isEmpty()
+                || expectedList == null || expectedList.isEmpty()) {
+            return 0.0;
+        }
+        Set<String> expected = new HashSet<>(expectedList);
+
+        // DCG@K
+        double dcg = 0.0;
+        int limit = Math.min(k, retrieved.size());
+        for (int i = 0; i < limit; i++) {
+            if (expected.contains(retrieved.get(i))) {
+                // rank i+1 -> log2(i+2)
+                dcg += 1.0 / (Math.log(i + 2) / LOG_2);
+            }
+        }
+
+        // IDCG@K: 理想情况下,前 min(k, |expected|) 位全部命中
+        double idcg = 0.0;
+        int idealLimit = Math.min(k, expected.size());
+        for (int i = 0; i < idealLimit; i++) {
+            idcg += 1.0 / (Math.log(i + 2) / LOG_2);
+        }
+
+        return idcg == 0.0 ? 0.0 : dcg / idcg;
+    }
  
     // =========================================================================
     // 持久化与工具方法
@@ -224,14 +278,16 @@ public class RagEvalService {
                 .filter(s -> !s.isEmpty())
                 .collect(Collectors.toSet());
     }
- 
+
     private Long saveRunRecord(String pipeline, int total, BigDecimal hitAt3, BigDecimal mrrAt5,
-                               int avgLatency, List<RagEvalDetail> details, int topK) {
+                               BigDecimal ndcgAt5, int avgLatency, List<RagEvalDetail> details,
+                               int topK) {
         RagEvalRun run = new RagEvalRun();
         run.setPipeline(pipeline);
         run.setTotalCount(total);
         run.setHitAt3(hitAt3);
         run.setMrrAt5(mrrAt5);
+        run.setNdcgAt5(ndcgAt5);
         run.setAvgLatencyMs(avgLatency);
         try {
             run.setDetailJson(objectMapper.writeValueAsString(details));
@@ -239,8 +295,8 @@ public class RagEvalService {
             log.warn("[RAG-EVAL] detail 序列化失败", e);
             run.setDetailJson("[]");
         }
-        run.setConfigSnapshot(String.format("{\"topK\":%d,\"hitK\":%d,\"mrrK\":%d}",
-                topK, HIT_K, MRR_K));
+        run.setConfigSnapshot(String.format("{\"topK\":%d,\"hitK\":%d,\"mrrK\":%d,\"ndcgK\":%d}",
+                topK, HIT_K, MRR_K, NDCG_K));
         evalRunMapper.insert(run);
         return run.getId();
     }

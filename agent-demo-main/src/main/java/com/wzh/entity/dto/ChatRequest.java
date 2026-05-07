@@ -14,4 +14,7 @@ public class ChatRequest {
 
     /** 用户上传的图片URL列表（截图提问场景） */
     private List<String> imageUrls;
+
+    /** 用户主动选择的 feature_name(前端下拉框); 为空则后端 LLM 自动提取 */
+    private String selectedFeatureName;
 }

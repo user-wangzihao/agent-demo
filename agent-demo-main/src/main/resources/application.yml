@@ -10,6 +10,9 @@ spring:
     multipart:
       max-file-size: 500MB
       max-request-size: 600MB
+  mvc:
+    async:
+      request-timeout: 300000
   ai:
     dashscope:
       api-key: sk-18ef5769878142bfbb75b3f7a0f3a823
@@ -170,3 +173,12 @@ rag:
     fallback-on-error: true
     # 并行检索线程池大小
     thread-pool-size: 4
+  prod:
+    feature-aware-enabled: true
+    feature-extract-enabled: true
+    rewriting-fallback-enabled: true
+    reranker-enabled: true
+    final-top-k: 8
+    feature-aware-top-k: 8
+    temperature: 0.1
+    max-tokens: 100

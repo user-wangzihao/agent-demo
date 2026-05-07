@@ -16,6 +16,7 @@ public class RagEvalRunRequest {
      * - reranker: 向量检索 top-20 -> Reranker top-K
      * - rewriting: Query Rewriting 后向量检索 top-K
      * - rewriting+reranker: 全流程
+     * - feature_aware: 带特征向量检索
      *
      * <p>阶段 0 只支持 baseline,后续接入 Reranker/Rewriting 后扩展。</p>
      */

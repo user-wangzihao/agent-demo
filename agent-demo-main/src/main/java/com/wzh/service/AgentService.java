@@ -48,6 +48,7 @@ public class AgentService {
     private final ObjectMapper objectMapper;
     private final FaqDocumentService faqDocumentService;
     private final ChatClient mcpChatClient;
+    private final ProductionRetrieveService productionRetrieveService;
 
     public AgentService(FeatureDocumentService featureDocumentService,
                         DashScopeService dashScopeService,
@@ -59,7 +60,8 @@ public class AgentService {
                         SysUserMapper sysUserMapper,
                         ObjectMapper objectMapper,
                         FaqDocumentService faqDocumentService,
-                        ChatClient mcpChatClient) {
+                        ChatClient mcpChatClient,
+                        ProductionRetrieveService productionRetrieveService) {
         this.featureDocumentService = featureDocumentService;
         this.dashScopeService = dashScopeService;
         this.milvusService = milvusService;
@@ -71,6 +73,7 @@ public class AgentService {
         this.objectMapper = objectMapper;
         this.faqDocumentService = faqDocumentService;
         this.mcpChatClient = mcpChatClient;
+        this.productionRetrieveService = productionRetrieveService;
     }
 
     // ==================== 文档学习 ====================
@@ -178,8 +181,8 @@ public class AgentService {
 
     // ==================== 流式对话 ====================
 
-    public SseEmitter chatStream(Long sessionId, String userMessage, List<String> imageUrls) {
-        SseEmitter emitter = new SseEmitter(120_000L);
+    public SseEmitter chatStream(Long sessionId, String userMessage, List<String> imageUrls, String selectedFeatureName) {
+        SseEmitter emitter = new SseEmitter(300_000L);
         Long userId = UserContext.getUserId();
         // 在请求线程捕获 TokenInfo，传播到新线程（ThreadLocal 不跨线程）
         com.wzh.utils.TokenUtil.TokenInfo tokenInfo = UserContext.get();
@@ -219,8 +222,13 @@ public class AgentService {
                 }
 
                 // Step 2: 向量检索
-                List<Float> queryVector = dashScopeService.getEmbedding(enhancedMessage);
-                List<SearchResult> searchResults = milvusService.search(queryVector, 8);
+                //List<Float> queryVector = dashScopeService.getEmbedding(enhancedMessage);
+                //List<SearchResult> searchResults = milvusService.search(queryVector, 8);
+                //List<SearchResult> processedResults = postProcessSearchResults(searchResults);
+
+                // Step 2: 向量检索 (生产侧 RAG 流水线: feature_aware 优先 + rewriting/reranker 兜底)
+                List<SearchResult> searchResults = productionRetrieveService.retrieve(
+                        enhancedMessage, selectedFeatureName);
                 List<SearchResult> processedResults = postProcessSearchResults(searchResults);
 
                 StringBuilder context = new StringBuilder();
@@ -317,7 +325,7 @@ public class AgentService {
     }
 
     private SseEmitter chatStreamInternal(Long sessionId, String userMessage, List<String> imageUrls) {
-        SseEmitter emitter = new SseEmitter(120_000L);
+        SseEmitter emitter = new SseEmitter(300_000L);
         Long userId = UserContext.getUserId();
         com.wzh.utils.TokenUtil.TokenInfo tokenInfo = UserContext.get();
         final Long finalSessionId = sessionId;
@@ -337,8 +345,13 @@ public class AgentService {
                     if (!imageContext.isEmpty()) enhancedMessage = userMessage + "\n\n" + imageContext;
                 }
 
-                List<Float> queryVector = dashScopeService.getEmbedding(enhancedMessage);
-                List<SearchResult> searchResults = milvusService.search(queryVector, 8);
+                //List<Float> queryVector = dashScopeService.getEmbedding(enhancedMessage);
+                //List<SearchResult> searchResults = milvusService.search(queryVector, 8);
+                //List<SearchResult> processedResults = postProcessSearchResults(searchResults);
+
+                // 重新生成场景: 没有 selectedFeatureName, 由 LLM 自动提取
+                List<SearchResult> searchResults = productionRetrieveService.retrieve(
+                        enhancedMessage, null);
                 List<SearchResult> processedResults = postProcessSearchResults(searchResults);
 
                 StringBuilder context = new StringBuilder();

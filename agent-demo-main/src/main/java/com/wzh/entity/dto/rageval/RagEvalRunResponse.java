@@ -30,6 +30,9 @@ public class RagEvalRunResponse {
  
     /** MRR@5 */
     private BigDecimal mrrAt5;
+
+    /** NDCG@5 指标 */
+    private BigDecimal ndcgAt5;
  
     /** 平均检索耗时(ms) */
     private Integer avgLatencyMs;
