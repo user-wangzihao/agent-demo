@@ -76,7 +76,8 @@ public class TestController {
                 "你是一个简洁的助手，用一句话回答问题。",
                 prompt,
                 0.2f,
-                200
+                200,
+                null
         );
     }
 

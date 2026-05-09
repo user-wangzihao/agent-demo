@@ -120,7 +120,8 @@ public class QueryRewriteService {
                     systemPrompt,
                     "原查询:" + query + "\n输出:",
                     rewriteProperties.getTemperature(),
-                    rewriteProperties.getMaxTokens()
+                    rewriteProperties.getMaxTokens(),
+                    null
             );
 
             // 2. 解析 JSON

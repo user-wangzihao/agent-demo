@@ -17,8 +17,12 @@ import com.wzh.common.UserContext;
 import com.wzh.entity.FaqDocument;
 import com.wzh.entity.dto.FaqDocumentDTO;
 import com.wzh.entity.dto.FeatureDocumentDTO;
+import com.wzh.enums.Intent;
+import com.wzh.model.intent.IntentClassificationResult;
 import com.wzh.service.MilvusService.ChunkData;
 import com.wzh.service.MilvusService.SearchResult;
+import com.wzh.service.intent.IntentBoostUtil;
+import com.wzh.service.intent.IntentClassifier;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
@@ -49,6 +53,7 @@ public class AgentService {
     private final FaqDocumentService faqDocumentService;
     private final ChatClient mcpChatClient;
     private final ProductionRetrieveService productionRetrieveService;
+    private final IntentClassifier intentClassifier;
 
     public AgentService(FeatureDocumentService featureDocumentService,
                         DashScopeService dashScopeService,
@@ -61,7 +66,8 @@ public class AgentService {
                         ObjectMapper objectMapper,
                         FaqDocumentService faqDocumentService,
                         ChatClient mcpChatClient,
-                        ProductionRetrieveService productionRetrieveService) {
+                        ProductionRetrieveService productionRetrieveService,
+                        IntentClassifier intentClassifier) {
         this.featureDocumentService = featureDocumentService;
         this.dashScopeService = dashScopeService;
         this.milvusService = milvusService;
@@ -74,6 +80,7 @@ public class AgentService {
         this.faqDocumentService = faqDocumentService;
         this.mcpChatClient = mcpChatClient;
         this.productionRetrieveService = productionRetrieveService;
+        this.intentClassifier = intentClassifier;
     }
 
     // ==================== 文档学习 ====================
@@ -141,7 +148,8 @@ public class AgentService {
 
         StringBuilder sb = new StringBuilder();
         sb.append("知识类型: 用户常见问题(FAQ)\n");
-        if (faq.getRelatedFeatureName() != null) sb.append("功能名称: ").append(faq.getRelatedFeatureName()).append("\n");
+        if (faq.getRelatedFeatureName() != null)
+            sb.append("功能名称: ").append(faq.getRelatedFeatureName()).append("\n");
         sb.append("问题: ").append(faq.getQuestion()).append("\n");
         sb.append("答案: ").append(faq.getAnswer());
 
@@ -201,13 +209,29 @@ public class AgentService {
         userMsg.setRole("user");
         userMsg.setContent(userMessage);
         if (imageUrls != null && !imageUrls.isEmpty()) {
-            try { userMsg.setUserImages(objectMapper.writeValueAsString(imageUrls)); } catch (Exception ignored) {}
+            try {
+                userMsg.setUserImages(objectMapper.writeValueAsString(imageUrls));
+            } catch (Exception ignored) {
+            }
         }
         chatMessageMapper.insert(userMsg);
 
         new Thread(() -> {
             UserContext.set(tokenInfo);
             try {
+                // Step 0 (新增): 意图识别
+                IntentClassificationResult intentResult = intentClassifier.classify(userMessage);
+                Intent intent = intentResult.getIntent();
+                log.info("[INTENT] sessionId={} query='{}' intent={} source={} conf={}",
+                        finalSessionId, userMessage, intent.getCode(),
+                        intentResult.getSource(), intentResult.getConfidence());
+
+                // Step 0.5 (新增): chitchat 短路 - 跳过图片理解和 RAG, 直接 LLM 回答
+                if (intent.isShortCircuit()) {
+                    streamChitchatResponse(emitter, userMessage, finalSessionId);
+                    return;
+                }
+
                 // Step 1: 多模态图片理解
                 String enhancedMessage = userMessage;
                 if (imageUrls != null && !imageUrls.isEmpty()) {
@@ -215,8 +239,11 @@ public class AgentService {
                     for (String imageUrl : imageUrls) {
                         try {
                             String desc = imageUnderstandingService.analyzeUserScreenshot(imageUrl, userMessage);
-                            if (StrUtil.isNotBlank(desc)) imageContext.append("【用户截图内容】").append(desc).append("\n");
-                        } catch (Exception e) { log.warn("用户截图理解失败: {}", e.getMessage()); }
+                            if (StrUtil.isNotBlank(desc))
+                                imageContext.append("【用户截图内容】").append(desc).append("\n");
+                        } catch (Exception e) {
+                            log.warn("用户截图理解失败: {}", e.getMessage());
+                        }
                     }
                     if (!imageContext.isEmpty()) enhancedMessage = userMessage + "\n\n" + imageContext;
                 }
@@ -229,6 +256,8 @@ public class AgentService {
                 // Step 2: 向量检索 (生产侧 RAG 流水线: feature_aware 优先 + rewriting/reranker 兜底)
                 List<SearchResult> searchResults = productionRetrieveService.retrieve(
                         enhancedMessage, selectedFeatureName);
+                // Step 2.5 (新增): 按意图加权 chunk_type, 让对应类型 chunk 排序靠前
+                IntentBoostUtil.applyBoost(searchResults, intent);
                 List<SearchResult> processedResults = postProcessSearchResults(searchResults);
 
                 StringBuilder context = new StringBuilder();
@@ -237,7 +266,10 @@ public class AgentService {
                     context.append("以下是从知识库中检索到的相关信息：\n\n");
                     int idx = 0;
                     for (SearchResult sr : processedResults) {
-                        if ("image_description".equals(sr.chunkType)) { collectImages(sr.imageUrls, relatedImages); continue; }
+                        if ("image_description".equals(sr.chunkType)) {
+                            collectImages(sr.imageUrls, relatedImages);
+                            continue;
+                        }
                         idx++;
                         context.append(String.format("【知识片段 %d】(来源: %s - %s, 相关度: %.2f)\n%s\n\n",
                                 idx, sr.featureName, sr.chunkType, sr.score, sr.content));
@@ -247,7 +279,13 @@ public class AgentService {
 
                 List<SourceInfo> sources = processedResults.stream()
                         .filter(sr -> !"image_description".equals(sr.chunkType))
-                        .map(sr -> { SourceInfo s = new SourceInfo(); s.featureName = sr.featureName; s.chunkType = sr.chunkType; s.score = sr.score; return s; })
+                        .map(sr -> {
+                            SourceInfo s = new SourceInfo();
+                            s.featureName = sr.featureName;
+                            s.chunkType = sr.chunkType;
+                            s.score = sr.score;
+                            return s;
+                        })
                         .collect(Collectors.toList());
 
                 // Step 3: 发送 meta
@@ -275,7 +313,7 @@ public class AgentService {
                 String currentUserName = currentUser != null ? currentUser.getNickname() : "用户";
                 String currentUserId = currentUser != null ? currentUser.getUsername() : String.valueOf(userId);
 
-                String systemPrompt = buildSystemPrompt(context.toString(), currentUserRole);
+                String systemPrompt = buildSystemPrompt(context.toString(), currentUserRole, intent);
                 final String finalEnhancedMessage = enhancedMessage;
 
                 // Step 6: 通过 Spring AI ChatClient 统一处理（工具调用由 MCP Client 自动路由到 MCP Server）
@@ -286,8 +324,12 @@ public class AgentService {
 
             } catch (Exception e) {
                 log.error("Agent 对话异常", e);
-                try { emitter.send(SseEmitter.event().name("error").data(e.getMessage())); emitter.complete(); }
-                catch (Exception ex) { emitter.completeWithError(ex); }
+                try {
+                    emitter.send(SseEmitter.event().name("error").data(e.getMessage()));
+                    emitter.complete();
+                } catch (Exception ex) {
+                    emitter.completeWithError(ex);
+                }
             }
         }).start();
 
@@ -318,7 +360,8 @@ public class AgentService {
             try {
                 imageUrls = objectMapper.readValue(userMsg.getUserImages(),
                         objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            }
         }
         chatMessageMapper.deleteById(messageId);
         return chatStreamInternal(sessionId, userMsg.getContent(), imageUrls);
@@ -333,14 +376,29 @@ public class AgentService {
         new Thread(() -> {
             UserContext.set(tokenInfo);
             try {
+                // 意图识别 + chitchat 短路
+                IntentClassificationResult intentResult = intentClassifier.classify(userMessage);
+                Intent intent = intentResult.getIntent();
+                log.info("[INTENT] sessionId={} query='{}' intent={} source={} conf={} (regenerate)",
+                        finalSessionId, userMessage, intent.getCode(),
+                        intentResult.getSource(), intentResult.getConfidence());
+
+                if (intent.isShortCircuit()) {
+                    streamChitchatResponse(emitter, userMessage, finalSessionId);
+                    return;
+                }
+
                 String enhancedMessage = userMessage;
                 if (imageUrls != null && !imageUrls.isEmpty()) {
                     StringBuilder imageContext = new StringBuilder();
                     for (String imageUrl : imageUrls) {
                         try {
                             String desc = imageUnderstandingService.analyzeUserScreenshot(imageUrl, userMessage);
-                            if (StrUtil.isNotBlank(desc)) imageContext.append("【用户截图内容】").append(desc).append("\n");
-                        } catch (Exception e) { log.warn("用户截图理解失败: {}", e.getMessage()); }
+                            if (StrUtil.isNotBlank(desc))
+                                imageContext.append("【用户截图内容】").append(desc).append("\n");
+                        } catch (Exception e) {
+                            log.warn("用户截图理解失败: {}", e.getMessage());
+                        }
                     }
                     if (!imageContext.isEmpty()) enhancedMessage = userMessage + "\n\n" + imageContext;
                 }
@@ -352,6 +410,7 @@ public class AgentService {
                 // 重新生成场景: 没有 selectedFeatureName, 由 LLM 自动提取
                 List<SearchResult> searchResults = productionRetrieveService.retrieve(
                         enhancedMessage, null);
+                IntentBoostUtil.applyBoost(searchResults, intent);
                 List<SearchResult> processedResults = postProcessSearchResults(searchResults);
 
                 StringBuilder context = new StringBuilder();
@@ -360,7 +419,10 @@ public class AgentService {
                     context.append("以下是从知识库中检索到的相关信息：\n\n");
                     int idx = 0;
                     for (SearchResult sr : processedResults) {
-                        if ("image_description".equals(sr.chunkType)) { collectImages(sr.imageUrls, relatedImages); continue; }
+                        if ("image_description".equals(sr.chunkType)) {
+                            collectImages(sr.imageUrls, relatedImages);
+                            continue;
+                        }
                         idx++;
                         context.append(String.format("【知识片段 %d】(来源: %s - %s, 相关度: %.2f)\n%s\n\n",
                                 idx, sr.featureName, sr.chunkType, sr.score, sr.content));
@@ -370,7 +432,13 @@ public class AgentService {
 
                 List<SourceInfo> sources = processedResults.stream()
                         .filter(sr -> !"image_description".equals(sr.chunkType))
-                        .map(sr -> { SourceInfo s = new SourceInfo(); s.featureName = sr.featureName; s.chunkType = sr.chunkType; s.score = sr.score; return s; })
+                        .map(sr -> {
+                            SourceInfo s = new SourceInfo();
+                            s.featureName = sr.featureName;
+                            s.chunkType = sr.chunkType;
+                            s.score = sr.score;
+                            return s;
+                        })
                         .collect(Collectors.toList());
 
                 emitter.send(SseEmitter.event().name("meta").data(objectMapper.writeValueAsString(Map.of(
@@ -395,7 +463,7 @@ public class AgentService {
                 String currentUserName = currentUser != null ? currentUser.getNickname() : "用户";
                 String currentUserId = currentUser != null ? currentUser.getUsername() : String.valueOf(userId);
 
-                String systemPrompt = buildSystemPrompt(context.toString(), currentUserRole);
+                String systemPrompt = buildSystemPrompt(context.toString(), currentUserRole, intent);
                 final String finalEnhancedMessage = enhancedMessage;
 
                 streamWithChatClient(emitter, systemPrompt, chatHistory, finalEnhancedMessage,
@@ -404,8 +472,12 @@ public class AgentService {
 
             } catch (Exception e) {
                 log.error("Agent 对话异常", e);
-                try { emitter.send(SseEmitter.event().name("error").data(e.getMessage())); emitter.complete(); }
-                catch (Exception ex) { emitter.completeWithError(ex); }
+                try {
+                    emitter.send(SseEmitter.event().name("error").data(e.getMessage()));
+                    emitter.complete();
+                } catch (Exception ex) {
+                    emitter.completeWithError(ex);
+                }
             } finally {
                 UserContext.clear();
             }
@@ -512,7 +584,8 @@ public class AgentService {
                         md.append("**用户上传的截图：**\n\n");
                         for (String img : imgs) md.append("![截图](").append(img).append(")\n\n");
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                }
             }
             md.append("---\n\n");
         }
@@ -521,7 +594,7 @@ public class AgentService {
 
     // ==================== System Prompt ====================
 
-    private String buildSystemPrompt(String retrievedContext, String userRole) {
+    private String buildSystemPrompt(String retrievedContext, String userRole, Intent intent) {
         boolean isAdmin = "admin".equals(userRole);
 
         String adminToolsSection = isAdmin ? """
@@ -553,50 +626,48 @@ public class AgentService {
                 
                 """ : "";
 
+        // 关键修复: 这一行你之前漏了, 导致 intentStyleSection 未定义编译失败
+        String intentStyleSection = buildIntentStyleSection(intent);
+
         String basePrompt = """
                 你是一个专业的软件产品技术支持助手。你的唯一知识来源是下方提供的知识片段，你必须严格基于这些知识来回答用户的问题。
                 
                 === 工单工具使用规则 ===
                 
-                你拥有工单相关工具：submitTicket（提交工单）和 queryTicketStatus（查询工单状态）。
+                你拥有工单相关工具:submitTicket(提交工单)和 queryTicketStatus(查询工单状态)。
                 
                 【何时调用 submitTicket】
-                满足以下任一条件时调用：
-                1. 用户明确说出：「转人工」「转给技术人员」「提交工单」「人工处理」等
-                2. 知识库完全没有相关信息，且用户的问题是具体的功能故障或异常
-                调用前先向用户确认：「好的，我来帮您提交工单，请稍候。」
+                满足以下任一条件时调用:
+                1. 用户明确说出:「转人工」「转给技术人员」「提交工单」「人工处理」等
+                2. 知识库完全没有相关信息,且用户的问题是具体的功能故障或异常
+                调用前先向用户确认:「好的,我来帮您提交工单,请稍候。」
                 调用成功后告知工单编号并提示可查询进度。
                 
                 【何时调用 queryTicketStatus】
-                用户提到工单编号并询问进度时调用，例如：「我的 TK-xxx 处理得怎么样了？」
+                用户提到工单编号并询问进度时调用,例如:「我的 TK-xxx 处理得怎么样了?」
                 
                 【不要滥用工具】
-                - 知识库有答案时，直接回答，不要提交工单
+                - 知识库有答案时,直接回答,不要提交工单
                 - 不要在没有工单编号的情况下调用 queryTicketStatus
                 
-                """ + adminToolsSection + """
+                """ + adminToolsSection + intentStyleSection + """
                 === 回答规则 ===
                 
-                【规则一：忠于知识库】
-                回答必须以知识片段中的信息为准，严禁根据通用知识自行推测、编造答案。
+                【规则一:忠于知识库】
+                回答必须以知识片段中的信息为准,严禁根据通用知识自行推测、编造答案。
                 
-                【规则二：按问题类型回答】
-                1) 报错/故障排查类 → 直接给出原因 + 解决方法
-                2) 操作步骤类 → 精简编号步骤 + 前置条件
-                3) 功能介绍类 → 2-3句话概括用途和核心能力
+                【规则二:控制回答长度】
+                回答控制在300字以内,最长不超过500字。
                 
-                【规则三：控制回答长度】
-                回答控制在300字以内，最长不超过500字。
+                【规则三:格式规范】
+                使用 Markdown 格式,善用**加粗**、有序列表等。
                 
-                【规则四：格式规范】
-                使用 Markdown 格式，善用**加粗**、有序列表等。
+                【规则四:信息不足时的处理】
+                知识库没有相关信息时,主动询问用户是否需要提交工单:
+                「关于这个问题,我目前的知识库暂未覆盖完整答案。需要我帮您提交工单,让技术人员进一步协助吗?」
                 
-                【规则五：信息不足时的处理】
-                知识库没有相关信息时，主动询问用户是否需要提交工单：
-                「关于这个问题，我目前的知识库暂未覆盖完整答案。需要我帮您提交工单，让技术人员进一步协助吗？」
-                
-                【规则六：引用来源】
-                回答末尾标注：（参考：XX功能-XX板块）
+                【规则五:引用来源】
+                回答末尾标注:(参考:XX功能-XX板块)
                 
                 使用中文回答。
                 
@@ -606,6 +677,119 @@ public class AgentService {
             return basePrompt + retrievedContext;
         } else {
             return basePrompt + "当前知识库中没有检索到相关信息。\n";
+        }
+    }
+
+    /**
+     * 根据意图返回差异化的"回答风格"段落.
+     *
+     * <p>4 + 1 分类中, chitchat 不会走到这里 (短路了), 所以只处理另外 4 类.</p>
+     */
+    private String buildIntentStyleSection(Intent intent) {
+        if (intent == null || intent == Intent.DEFAULT) {
+            return ""; // 默认不注入额外风格, 走通用规则
+        }
+        return switch (intent) {
+            case HOW_TO -> """
+                
+                === 当前查询类型: 操作指引 (how_to) ===
+                
+                用户在询问"怎么做". 回答时务必:
+                1. 用编号步骤(1. 2. 3.)清晰列出操作流程
+                2. 明确每步的具体操作位置(菜单/按钮/界面区域)
+                3. 如有前置条件,在步骤前面用"前置条件:"标注
+                4. 关键操作可以用**加粗**强调
+                
+                """;
+            case TROUBLESHOOT -> """
+                
+                === 当前查询类型: 故障排查 (troubleshoot) ===
+                
+                用户在报告错误或异常. 回答时务必:
+                1. 先用一句话复述用户的错误现象,体现你听懂了
+                2. 给出可能的原因(优先级从高到低)
+                3. 给出对应的解决步骤
+                4. 末尾给出"如何预防"或"后续注意事项"
+                
+                """;
+            case FEATURE_INTRO -> """
+                
+                === 当前查询类型: 功能介绍 (feature_intro) ===
+                
+                用户在询问某功能"是什么". 回答时务必:
+                1. 第一句话用一句话概括功能定义
+                2. 接着说明 2-3 个典型应用场景
+                3. 最后说明该功能与其他相关功能的关系(如果知识库有)
+                
+                """;
+            default -> "";
+        };
+    }
+
+    /**
+     * Chitchat 短路: 不走 RAG / MCP 工具调用 / 检索, 直接调 DashScope 流式生成.
+     *
+     * <p><b>性能收益</b>: 跳过 embedding (~500ms) + Milvus (~100ms) + Reranker (~200ms),
+     * 累计省 ~1 秒延迟. 也省了一次 ChatClient 工具协商的开销.</p>
+     *
+     * <p><b>协议一致性</b>: 仍然发 meta 事件 (空数组), 仍然保存 assistant 消息到 DB,
+     * 让前端无感知, 历史消息列表也不会出现"洞".</p>
+     */
+    private void streamChitchatResponse(SseEmitter emitter, String userMessage, Long sessionId) {
+        try {
+            // 发空 meta, 保持前端协议
+            emitter.send(SseEmitter.event().name("meta").data(objectMapper.writeValueAsString(Map.of(
+                    "sessionId", sessionId,
+                    "relatedImages", Collections.emptyList(),
+                    "sources", Collections.emptyList()))));
+
+            String chitchatPrompt = """
+                你是一个友好的产品智能助手。
+                用户当前不是在咨询产品问题,而是和你闲聊或打招呼。
+                回答风格:
+                1. 简短自然(1-2 句话)
+                2. 友好不过度热情
+                3. 不要主动转移话题
+                4. 不要调用任何工具
+                使用中文回答。
+                """;
+
+            StringBuilder fullContent = new StringBuilder();
+            dashScopeService.chatStream(
+                    chitchatPrompt,
+                    Collections.emptyList(),  // chitchat 不需要历史
+                    userMessage,
+                    delta -> {
+                        fullContent.append(delta);
+                        try {
+                            emitter.send(SseEmitter.event().name("token").data(delta));
+                        } catch (Exception e) {
+                            log.warn("SSE 发送失败 (chitchat)", e);
+                        }
+                    },
+                    fullText -> {
+                        // 保存 assistant 消息
+                        ChatMessage assistantMsg = new ChatMessage();
+                        assistantMsg.setSessionId(sessionId);
+                        assistantMsg.setRole("assistant");
+                        assistantMsg.setContent(fullText);
+                        try {
+                            assistantMsg.setRelatedImages(objectMapper.writeValueAsString(Collections.emptyList()));
+                            assistantMsg.setSources(objectMapper.writeValueAsString(Collections.emptyList()));
+                        } catch (Exception ignored) {}
+                        chatMessageMapper.insert(assistantMsg);
+
+                        try {
+                            emitter.send(SseEmitter.event().name("done").data(""));
+                            emitter.complete();
+                        } catch (Exception e) {
+                            emitter.completeWithError(e);
+                        }
+                    },
+                    error -> handleStreamError(emitter, error)
+            );
+        } catch (Exception e) {
+            handleStreamError(emitter, e);
         }
     }
 
@@ -649,7 +833,9 @@ public class AgentService {
         try {
             emitter.send(SseEmitter.event().name("error").data(error.getMessage()));
             emitter.complete();
-        } catch (Exception ex) { emitter.completeWithError(ex); }
+        } catch (Exception ex) {
+            emitter.completeWithError(ex);
+        }
     }
 
     private List<SearchResult> postProcessSearchResults(List<SearchResult> rawResults) {
@@ -670,7 +856,8 @@ public class AgentService {
             Set<String> covered = knowledgeResults.stream().map(sr -> sr.featureName).collect(Collectors.toSet());
             Map<String, SearchResult> best = new LinkedHashMap<>();
             for (SearchResult sr : textResults) {
-                if (covered.contains(sr.featureName)) best.merge(sr.featureName, sr, (a, b) -> b.score > a.score ? b : a);
+                if (covered.contains(sr.featureName))
+                    best.merge(sr.featureName, sr, (a, b) -> b.score > a.score ? b : a);
                 else finalResults.add(sr);
             }
             finalResults.addAll(best.values());
@@ -696,7 +883,8 @@ public class AgentService {
                 if (StrUtil.isNotBlank(detail.getDescription())) {
                     List<String> kp = extractKeyPoints(detail.getDescription());
                     if (!kp.isEmpty()) {
-                        if (StrUtil.isNotBlank(detail.getTitle())) sb.append("[").append(detail.getTitle()).append("] ");
+                        if (StrUtil.isNotBlank(detail.getTitle()))
+                            sb.append("[").append(detail.getTitle()).append("] ");
                         sb.append(String.join("; ", kp)).append(" ");
                     }
                 }
@@ -726,7 +914,10 @@ public class AgentService {
             String t = sentence.trim();
             if (t.length() < 5) continue;
             for (String kw : keywords) {
-                if (t.contains(kw)) { keyPoints.add(t.length() > 80 ? t.substring(0, 80) + "..." : t); break; }
+                if (t.contains(kw)) {
+                    keyPoints.add(t.length() > 80 ? t.substring(0, 80) + "..." : t);
+                    break;
+                }
             }
             if (keyPoints.size() >= 5) break;
         }
@@ -835,17 +1026,27 @@ public class AgentService {
         if (imageUrlsObj == null) return;
         if (imageUrlsObj instanceof List) {
             @SuppressWarnings("unchecked") List<String> imgList = (List<String>) imageUrlsObj;
-            for (String url : imgList) { String t = url.trim(); if (!t.isEmpty() && !target.contains(t)) target.add(t); }
+            for (String url : imgList) {
+                String t = url.trim();
+                if (!t.isEmpty() && !target.contains(t)) target.add(t);
+            }
         } else if (imageUrlsObj instanceof String str) {
             if (StrUtil.isBlank(str) || "[]".equals(str)) return;
             if (str.startsWith("[")) {
                 try {
                     List<String> imgs = objectMapper.readValue(str, objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
-                    for (String url : imgs) { String t = url.trim(); if (!t.isEmpty() && !target.contains(t)) target.add(t); }
+                    for (String url : imgs) {
+                        String t = url.trim();
+                        if (!t.isEmpty() && !target.contains(t)) target.add(t);
+                    }
                     return;
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                }
             }
-            for (String url : str.split(",")) { String t = url.trim(); if (!t.isEmpty() && !target.contains(t)) target.add(t); }
+            for (String url : str.split(",")) {
+                String t = url.trim();
+                if (!t.isEmpty() && !target.contains(t)) target.add(t);
+            }
         }
     }
 

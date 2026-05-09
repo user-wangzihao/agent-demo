@@ -182,3 +182,73 @@ rag:
     feature-aware-top-k: 8
     temperature: 0.1
     max-tokens: 100
+
+# ==================================================================
+# 意图识别配置
+# 文件位置: agent-demo-main/src/main/resources/application.yml
+# 追加到现有 yml 末尾, 与 dashscope/milvus/spring 平级
+# ==================================================================
+intent:
+  classifier:
+    # LLM 兜底开关. true = 关键词未命中时调 qwen-turbo;  false = 直接降级 DEFAULT
+    llm-fallback-enabled: true
+    # LLM 兜底模型 (qwen-turbo 性价比最高)
+    llm-model: qwen-turbo
+    # LLM 调用超时 (毫秒). 超时直接降级, 不阻塞用户对话
+    llm-timeout-ms: 3000
+    # 置信度阈值. LLM 返回置信度低于此值视为不可信, 降级为 DEFAULT
+    confidence-threshold: 0.6
+
+  keywords:
+    # 操作指引意图: 用户想知道"怎么做"
+    how_to:
+      - 怎么
+      - 如何
+      - 怎样
+      - 步骤
+      - 操作
+      - 在哪里
+      - 怎么用
+
+    # 故障排查意图: 用户报告错误/异常
+    troubleshoot:
+      - 报错
+      - 失败
+      - 无法
+      - 不能
+      - 不行
+      - 出错
+      - 异常
+      - 崩溃
+      - 卡住
+      - 没反应
+      - 没用
+      - 找不到
+      - 为什么
+
+    # 功能介绍意图: 用户问"是什么"
+    feature_intro:
+      - 是什么
+      - 什么是
+      - 有什么用
+      - 介绍
+      - 功能介绍
+      - 干什么的
+      - 干啥的
+      - 用来做什么
+      - 用途
+
+    # 闲聊意图: 与产品功能无关
+    chitchat:
+      - 你好
+      - 您好
+      - hi
+      - hello
+      - 谢谢
+      - 感谢
+      - 再见
+      - 拜拜
+      - 你是谁
+      - 你叫什么
+      - 早上好
+      - 晚上好

@@ -4,6 +4,7 @@ import com.alibaba.dashscope.aigc.generation.Generation;
 import com.alibaba.dashscope.aigc.generation.GenerationParam;
 import com.alibaba.dashscope.aigc.generation.GenerationResult;
 import com.alibaba.dashscope.common.Message;
+import com.alibaba.dashscope.common.ResponseFormat;
 import com.alibaba.dashscope.common.Role;
 import com.alibaba.dashscope.embeddings.TextEmbedding;
 import com.alibaba.dashscope.embeddings.TextEmbeddingParam;
@@ -102,22 +103,24 @@ public class DashScopeService {
     /**
      * 一次性、非流式 LLM 调用。
      *
-     * <p>与 {@link #chatStream} 的对话主流程隔离：不带历史、不开工具、低温度、非流式、低 maxTokens。
-     * 典型用途：query 改写、意图识别、JSON 输出、轻量分类等需要"稳定确定性输出"的场景。</p>
+     * <p>与 {@link #chatStream} 的对话主流程隔离:不带历史、不开工具、低温度、非流式、低 maxTokens。
+     * 典型用途:query 改写、意图识别、JSON 输出、轻量分类等需要"稳定确定性输出"的场景。</p>
      *
      * <p><b>失败策略</b>: 抛 RuntimeException,由调用方捕获并决定降级
      * (与 {@link #getEmbeddings} 风格一致)。</p>
      *
-     * @param model        模型名;为 null 或空字符串时用配置默认 chatModel (qwen-plus)
-     * @param systemPrompt 系统提示词;允许为 null 表示不传 system 消息
-     * @param userPrompt   用户内容;不能为空
-     * @param temperature  温度,建议 0.1-0.3 (确定性场景);范围 0.0-2.0
-     * @param maxTokens    最大生成 token 数,建议根据任务设定 (改写 ~200,JSON 输出 ~500)
+     * @param model          模型名;为 null 或空字符串时用配置默认 chatModel (qwen-plus)
+     * @param systemPrompt   系统提示词;允许为 null 表示不传 system 消息
+     * @param userPrompt     用户内容;不能为空
+     * @param temperature    温度,建议 0.1-0.3 (确定性场景);范围 0.0-2.0
+     * @param maxTokens      最大生成 token 数,建议根据任务设定 (改写 ~200,JSON 输出 ~500)
+     * @param responseFormat 响应格式; "json_object" 开启 JSON Mode (DashScope SDK ≥ 2.18.4 支持);
+     *                       null 或其他值表示默认文本输出
      * @return LLM 返回的纯文本内容
      * @throws RuntimeException 调用失败 (网络异常、API 错误、空响应等)
      */
     public String chatOnce(String model, String systemPrompt, String userPrompt,
-                           float temperature, int maxTokens) {
+                           float temperature, int maxTokens, String responseFormat) {
         if (userPrompt == null || userPrompt.trim().isEmpty()) {
             throw new IllegalArgumentException("userPrompt 不能为空");
         }
@@ -133,16 +136,23 @@ public class DashScopeService {
             }
             messages.add(Message.builder().role(Role.USER.getValue()).content(userPrompt).build());
 
-            GenerationParam param = GenerationParam.builder()
+            // 构造 GenerationParam, 按需开启 JSON Mode
+            GenerationParam.GenerationParamBuilder<?, ?> builder = GenerationParam.builder()
                     .apiKey(dashScopeConfig.getApiKey())
                     .model(actualModel)
                     .messages(messages)
                     .resultFormat(GenerationParam.ResultFormat.MESSAGE)
                     .temperature(temperature)
-                    .maxTokens(maxTokens)
-                    // 不开 incrementalOutput,一次性返回
-                    .build();
+                    .maxTokens(maxTokens);
+            // 不开 incrementalOutput, 一次性返回
 
+            // JSON Mode: DashScope 官方推荐的结构化输出方式 (SDK ≥ 2.18.4)
+            // prompt 里必须包含 "JSON" 关键词, 否则 API 报错
+            if ("json_object".equalsIgnoreCase(responseFormat)) {
+                builder.responseFormat(ResponseFormat.builder().type("json_object").build());
+            }
+
+            GenerationParam param = builder.build();
             Generation generation = new Generation();
             GenerationResult result = generation.call(param);
 
@@ -154,8 +164,8 @@ public class DashScopeService {
 
             String content = result.getOutput().getChoices().get(0).getMessage().getContent();
             long latency = System.currentTimeMillis() - start;
-            log.info("[CHAT-ONCE] model={} temp={} maxTokens={} latency={}ms inputLen={} outputLen={}",
-                    actualModel, temperature, maxTokens, latency,
+            log.info("[CHAT-ONCE] model={} temp={} maxTokens={} fmt={} latency={}ms inputLen={} outputLen={}",
+                    actualModel, temperature, maxTokens, responseFormat, latency,
                     userPrompt.length(), content == null ? 0 : content.length());
             return content == null ? "" : content;
 

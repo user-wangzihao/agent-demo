@@ -83,7 +83,8 @@ public class FeatureExtractService {
                     systemPrompt,
                     "用户:" + query + "\n输出:",
                     props.getTemperature(),
-                    props.getMaxTokens()
+                    props.getMaxTokens(),
+                    null
             );
 
             if (result == null) return null;
