@@ -58,8 +58,15 @@ public class ProductionRetrieveService {
     // 主入口
     // =========================================================================
 
+    // 【改动 2】retrieve 方法重构: 调用 resolveFeature + retrieveByMatchedFeature
+//   原方法体重构成下面这样, 对外行为完全等价
+
     /**
-     * 生产侧检索入口.
+     * 生产侧检索入口 (兼容 AgentService 老链路).
+     *
+     * <p><b>等价改造</b>: 老逻辑 (resolve + 三层检索) 被拆成 resolveFeature() +
+     * retrieveByMatchedFeature() 两步, 这里组合调用. 对外行为完全等价,
+     * AgentService 调用方无需改动.</p>
      *
      * @param query                用户 query (通常是 enhancedMessage, 含图片描述)
      * @param selectedFeatureName  前端用户主动选择的 feature_name; null/空 = 用户未选
@@ -69,39 +76,33 @@ public class ProductionRetrieveService {
         if (query == null || query.trim().isEmpty()) {
             return Collections.emptyList();
         }
-
-        // Step A: 确定 feature
         String matchedFeature = resolveFeature(query, selectedFeatureName);
-
-        // Step B: 检索 (大 try-catch 兜底, 异常一律降级 baseline)
-        try {
-            if (matchedFeature != null && props.isFeatureAwareEnabled()) {
-                List<SearchResult> r = retrieveFeatureAware(query, matchedFeature);
-                if (!r.isEmpty()) {
-                    return r;
-                }
-                log.warn("[PROD-RETRIEVE] feature_aware 命中 feature={} 但召回为空, 走 fallback",
-                        matchedFeature);
-            }
-            // 兜底链路: rewriting + RRF + reranker
-            if (props.isRewritingFallbackEnabled()) {
-                List<SearchResult> r = retrieveFallback(query);
-                if (!r.isEmpty()) return r;
-                log.warn("[PROD-RETRIEVE] fallback 链路结果为空, 走 baseline");
-            }
-            return retrieveBaseline(query);
-
-        } catch (Exception e) {
-            log.error("[PROD-RETRIEVE] 检索异常, 降级 baseline query={}", truncate(query, 40), e);
-            return retrieveBaseline(query);
-        }
+        return retrieveByMatchedFeature(query, matchedFeature);
     }
 
-    // =========================================================================
-    // Step A: 确定 feature
-    // =========================================================================
+    // 【改动 1】resolveFeature 方法签名: private → public
+//   原: private String resolveFeature(String query, String selectedFeatureName) { ... }
+//   改为:
 
-    private String resolveFeature(String query, String selectedFeatureName) {
+    /**
+     * 解析 query 涉及的 feature_name (供 Graph 模式调用).
+     *
+     * <p><b>三层匹配逻辑</b>:
+     * <ol>
+     *   <li>前端传了 selectedFeatureName → 三层匹配 (精确 / 别名 / 模糊)</li>
+     *   <li>前端未传 → LLM 提取候选 → 三层匹配</li>
+     *   <li>都没命中 → 返回 null</li>
+     * </ol></p>
+     *
+     * <p><b>暴露给外部的原因</b>: Graph 模式下 FeatureResolveNode 需要单独执行
+     * 这一步, 然后把结果存到 OverAllState. 检索阶段从 state 取 matchedFeature,
+     * 调 retrieveByMatchedFeature() 跳过解析直接检索, 避免重复执行.</p>
+     *
+     * @param query                用户 query
+     * @param selectedFeatureName  前端用户主动选择的 feature_name; null/空 = 用户未选
+     * @return 命中的 feature_name; 未命中 = null
+     */
+    public String resolveFeature(String query, String selectedFeatureName) {
         // 情况 1: 前端传了
         if (selectedFeatureName != null && !selectedFeatureName.trim().isEmpty()) {
             String matched = featureNameMatcher.match(selectedFeatureName);
@@ -120,6 +121,51 @@ public class ProductionRetrieveService {
         String candidate = featureExtractService.extract(query);
         if (candidate == null) return null;
         return featureNameMatcher.match(candidate);
+    }
+
+    // 【改动 3】新增 retrieveByMatchedFeature 方法
+
+    /**
+     * 根据已解析的 matchedFeature 执行检索 (供 Graph 模式调用).
+     *
+     * <p><b>使用场景</b>: Graph 模式下 FeatureResolveNode 已经解析过 feature,
+     * DocRetrieveNode 直接传入 matchedFeature, 跳过 resolveFeature 重复执行.</p>
+     *
+     * <p><b>检索流水线</b>:
+     * <pre>
+     *   matchedFeature 非空 + feature_aware 启用 → feature_aware 检索 (Milvus 标量过滤)
+     *      └─ 召回为空 → fallback (rewriting + RRF + reranker)
+     *   matchedFeature 为空                       → fallback
+     *   异常                                      → 降级 baseline
+     * </pre></p>
+     *
+     * @param query           用户 query
+     * @param matchedFeature  已解析的 feature_name; null = 未命中, 跳过 feature_aware 直接 fallback
+     * @return SearchResult 列表 (待 postProcessSearchResults 后处理)
+     */
+    public List<SearchResult> retrieveByMatchedFeature(String query, String matchedFeature) {
+        if (query == null || query.trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+        try {
+            if (matchedFeature != null && props.isFeatureAwareEnabled()) {
+                List<SearchResult> r = retrieveFeatureAware(query, matchedFeature);
+                if (!r.isEmpty()) {
+                    return r;
+                }
+                log.warn("[PROD-RETRIEVE] feature_aware 命中 feature={} 但召回为空, 走 fallback",
+                        matchedFeature);
+            }
+            if (props.isRewritingFallbackEnabled()) {
+                List<SearchResult> r = retrieveFallback(query);
+                if (!r.isEmpty()) return r;
+                log.warn("[PROD-RETRIEVE] fallback 链路结果为空, 走 baseline");
+            }
+            return retrieveBaseline(query);
+        } catch (Exception e) {
+            log.error("[PROD-RETRIEVE] 检索异常, 降级 baseline query={}", truncate(query, 40), e);
+            return retrieveBaseline(query);
+        }
     }
 
     // =========================================================================

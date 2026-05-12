@@ -52,6 +52,12 @@
             <artifactId>spring-ai-alibaba-starter-dashscope</artifactId>
         </dependency>
 
+        <!-- ============ Spring AI Alibaba: Graph 编排框架 ============ -->
+        <dependency>
+            <groupId>com.alibaba.cloud.ai</groupId>
+            <artifactId>spring-ai-alibaba-graph-core</artifactId>
+        </dependency>
+
         <!-- ============ 数据库 ============ -->
         <dependency>
             <groupId>com.mysql</groupId>
