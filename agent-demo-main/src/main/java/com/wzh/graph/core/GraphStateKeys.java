@@ -44,6 +44,8 @@ public final class GraphStateKeys {
     public static final String USER_IMAGE_URLS = "userImageUrls";
     /** 前端用户主动选择的 feature_name (String); 可空 */
     public static final String SELECTED_FEATURE_NAME = "selectedFeatureName";
+    /** 历史消息列表 (List<ChatMessage>): 多轮对话上下文, 由 Controller 加载注入 */
+    public static final String HISTORY_MESSAGES = "historyMessages";
 
     // ==================== 预处理结果 (PreprocessNode) ====================
 
