@@ -60,6 +60,8 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
         Intent intent = state.value(GraphStateKeys.INTENT, Intent.class).orElse(Intent.DEFAULT);
         List<SearchResult> processedDoc = (List<SearchResult>) state
                 .value(GraphStateKeys.RETRIEVED_DOC_CHUNKS).orElse(Collections.emptyList());
+        List<SearchResult> processedFaq = (List<SearchResult>) state
+                .value(GraphStateKeys.RETRIEVED_FAQ_CHUNKS).orElse(Collections.emptyList());
         List<ChatMessage> history = (List<ChatMessage>) state
                 .value(GraphStateKeys.HISTORY_MESSAGES).orElse(Collections.emptyList());
         /*TokenStreamSink sink = state.value(GraphStateKeys.TOKEN_SINK, TokenStreamSink.class)
@@ -68,7 +70,7 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
         TokenStreamSink sink = TokenSinkRegistry.get(execId);
 
         // 2. 拼 retrievedContext
-        String retrievedContext = buildRetrievedContext(processedDoc);
+        String retrievedContext = buildRetrievedContext(processedDoc, processedFaq);
 
         // 3. 构造 SystemPrompt
         String systemPrompt = SystemPromptBuilder.buildSystemPrompt(retrievedContext, userRole, intent);
@@ -89,8 +91,8 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.FINAL_ANSWER, answer);
 
-        log.info("[{}] chunks={} history={} promptLen={} answerLen={} mode={}",
-                NODE_ID, processedDoc.size(), history.size(), systemPrompt.length(),
+        log.info("[{}] doc={} faq={} history={} promptLen={} answerLen={} mode={}",
+                NODE_ID, processedDoc.size(), processedFaq.size(), history.size(), systemPrompt.length(),
                 answer == null ? 0 : answer.length(),
                 sink == TokenStreamSink.NOOP ? "sync" : "stream");
         appendPhaseLog(state, partial,
@@ -102,19 +104,47 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
     }
 
     /**
-     * 拼检索到的 chunks 为 system prompt 的 context 段 (严格复刻 AgentService 内联逻辑).
+     * 拼检索到的 chunks 为 system prompt 的 context 段 (第四刀升级: 加 FAQ 段).
+     *
+     * <p><b>拼接策略</b>: FAQ 在前, 文档在后. 让 LLM 优先采用 FAQ 答案
+     * (人工筛选高质量内容), 检索文档作为补充上下文.</p>
+     *
+     * <p><b>image_description 过滤</b>: 沿用 AgentService 原有约定,
+     * 图片描述 chunk 不进 Context (避免噪声),
+     * 但其 imageUrls 已经在 MergerNode 阶段被合并到 relatedImages 给前端展示.</p>
      */
-    private String buildRetrievedContext(List<SearchResult> processedResults) {
-        if (processedResults == null || processedResults.isEmpty()) return "";
-        StringBuilder context = new StringBuilder();
-        context.append("以下是从知识库中检索到的相关信息:\n\n");
-        int idx = 0;
-        for (SearchResult sr : processedResults) {
-            if ("image_description".equals(sr.chunkType)) continue;
-            idx++;
-            context.append(String.format("【知识片段 %d】(来源: %s - %s, 相关度: %.2f)%n%s%n%n",
-                    idx, sr.featureName, sr.chunkType, sr.score, sr.content));
+    private String buildRetrievedContext(List<SearchResult> processedDoc,
+                                         List<SearchResult> processedFaq) {
+        if ((processedDoc == null || processedDoc.isEmpty())
+                && (processedFaq == null || processedFaq.isEmpty())) {
+            return "";
         }
+        StringBuilder context = new StringBuilder();
+
+        // ============ FAQ 段 (在前) ============
+        if (processedFaq != null && !processedFaq.isEmpty()) {
+            context.append("以下是相关的常见问答 (FAQ, 优先参考):\n\n");
+            int idx = 0;
+            for (SearchResult sr : processedFaq) {
+                if ("image_description".equals(sr.chunkType)) continue;
+                idx++;
+                context.append(String.format("【FAQ %d】(相关度: %.2f)%n%s%n%n",
+                        idx, sr.score, sr.content));
+            }
+        }
+
+        // ============ 文档段 (在后) ============
+        if (processedDoc != null && !processedDoc.isEmpty()) {
+            context.append("以下是从知识库文档中检索到的相关信息:\n\n");
+            int idx = 0;
+            for (SearchResult sr : processedDoc) {
+                if ("image_description".equals(sr.chunkType)) continue;
+                idx++;
+                context.append(String.format("【知识片段 %d】(来源: %s - %s, 相关度: %.2f)%n%s%n%n",
+                        idx, sr.featureName, sr.chunkType, sr.score, sr.content));
+            }
+        }
+
         return context.toString();
     }
 

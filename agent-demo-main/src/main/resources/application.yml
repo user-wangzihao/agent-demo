@@ -99,6 +99,7 @@ milvus:
   host: 10.82.12.51
   port: 19530
   collection-name: feature_document_vectors
+  faq-collection-name: faq_vectors
 
 dashscope:
   api-key: sk-18ef5769878142bfbb75b3f7a0f3a823
@@ -252,3 +253,13 @@ intent:
       - 你叫什么
       - 早上好
       - 晚上好
+
+# ============ FAQ 检索配置 (第四刀新增) ============
+faq:
+  retrieve:
+    # FAQ 检索开关; false = FaqRetrieveNode 直接返回空 List, 不影响主流程
+    enabled: true
+    # 单路向量检索 top-K
+    top-k: 3
+    # 通用 FAQ 的 feature_name 标识 (沿用 AgentService.learnFaq 既定约定)
+    general-marker: "通用FAQ"

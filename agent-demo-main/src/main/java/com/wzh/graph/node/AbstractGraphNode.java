@@ -79,11 +79,9 @@ public abstract class AbstractGraphNode implements NodeAction {
      */
     @SuppressWarnings("unchecked")
     protected void appendPhaseLog(OverAllState state, Map<String, Object> partial, String line) {
-        // 优先用 partial 里已有的 (同一节点内多次 append), 没有再从 state 取
         List<String> log = (List<String>) partial.get(GraphStateKeys.PHASE_LOG);
         if (log == null) {
-            log = new ArrayList<>(
-                    state.<List<String>>value(GraphStateKeys.PHASE_LOG).orElse(new ArrayList<>()));
+            log = new ArrayList<>();   // 只放本节点新增, AppendStrategy 会自动 concat 历史
         }
         log.add(line);
         partial.put(GraphStateKeys.PHASE_LOG, log);
@@ -99,8 +97,7 @@ public abstract class AbstractGraphNode implements NodeAction {
                                       String nodeName, long costMs) {
         Map<String, Long> map = (Map<String, Long>) partial.get(GraphStateKeys.PHASE_LATENCIES);
         if (map == null) {
-            map = new HashMap<>(
-                    state.<Map<String, Long>>value(GraphStateKeys.PHASE_LATENCIES).orElse(new HashMap<>()));
+            map = new HashMap<>();   // 只放本节点新增, MergeStrategy 会自动 putAll 历史
         }
         map.put(nodeName, costMs);
         partial.put(GraphStateKeys.PHASE_LATENCIES, map);

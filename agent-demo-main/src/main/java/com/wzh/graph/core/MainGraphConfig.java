@@ -6,6 +6,8 @@ import com.alibaba.cloud.ai.graph.KeyStrategyFactory;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
+import com.alibaba.cloud.ai.graph.state.strategy.AppendStrategy;
+import com.alibaba.cloud.ai.graph.state.strategy.MergeStrategy;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import com.wzh.enums.Intent;
 import com.wzh.graph.node.*;
@@ -22,16 +24,16 @@ import static com.alibaba.cloud.ai.graph.action.AsyncEdgeAction.edge_async;
 import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
 
 /**
- * 主对话 Graph 的装配配置 (3.B 升级版).
+ * 主对话 Graph 的装配配置 (第四刀升级版).
  *
- * <p><b>Graph 形状 (3.B)</b>:
+ * <p><b>Graph 形状 (第四刀)</b>:
  * <pre>
  *   __START__
  *      → preprocess
  *      → intent ──(chitchat 短路)──→ chitchat_answer ──→ finalize → __END__
  *           ↓
- *      → feature_resolve
- *      → doc_retrieve
+ *      → feature_resolve ─┬→ doc_retrieve ─┐
+ *                         └→ faq_retrieve ─┴→ merger
  *      → merger ──┬─(admin_meta)──→ admin_agent     ─┐
  *                 ├─(ticket)─────→ ticket_agent     ─┤
  *                 └─(default)────→ knowledge_answer ─┤
@@ -39,18 +41,16 @@ import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
  *                                                 finalize → __END__
  * </pre></p>
  *
- * <p><b>变更点 vs 3.A</b>:
+ * <p><b>变更点 vs 3.C</b>:
  * <ul>
- *   <li>新增 4 个 answer 类节点: chitchat / knowledge / ticket / admin</li>
- *   <li>mock_answer 装配移除 (文件保留, 第六刀彻底删)</li>
- *   <li>新增 2 处 conditionalEdge</li>
- *   <li>分流判定全部下沉到 {@link RouteUtil}</li>
- * </ul></p>
- *
- * <p><b>3.C 升级预告</b>: SSE 流式输出, 用 CompiledGraph.stream() + Flux 订阅.</p>
+ *   <li>新增 faq_retrieve 节点 (与 doc_retrieve 并行)</li>
+ *   <li>feature_resolve → doc_retrieve / faq_retrieve 两条边触发 fan-out</li>
+ *   <li>doc_retrieve / faq_retrieve → merger 两条边自动 fan-in</li>
+ * </ul>
+ * 并行表达方式参考 Spring AI Alibaba Graph 官方 parallel-node 示例.</p>
  *
  * @author wzh
- * @since 2026-05-12
+ * @since 2026-05-13
  */
 @Slf4j
 @Configuration
@@ -61,6 +61,7 @@ public class MainGraphConfig {
     private static final String NODE_INTENT = "intent";
     private static final String NODE_FEATURE_RESOLVE = "feature_resolve";
     private static final String NODE_DOC_RETRIEVE = "doc_retrieve";
+    private static final String NODE_FAQ_RETRIEVE = "faq_retrieve";       // ★ 第四刀新增
     private static final String NODE_MERGER = "merger";
     private static final String NODE_CHITCHAT_ANSWER = "chitchat_answer";
     private static final String NODE_KNOWLEDGE_ANSWER = "knowledge_answer";
@@ -72,6 +73,7 @@ public class MainGraphConfig {
     private final IntentNode intentNode;
     private final FeatureResolveNode featureResolveNode;
     private final DocRetrieveNode docRetrieveNode;
+    private final FaqRetrieveNode faqRetrieveNode;                        // ★ 第四刀新增
     private final MergerNode mergerNode;
     private final ChitchatAnswerNode chitchatAnswerNode;
     private final KnowledgeAnswerNode knowledgeAnswerNode;
@@ -106,11 +108,13 @@ public class MainGraphConfig {
             s.put(GraphStateKeys.SOURCES, new ReplaceStrategy());
             // 生成
             s.put(GraphStateKeys.FINAL_ANSWER, new ReplaceStrategy());
-            // 3.C 流式 & 多轮
+            // 流式 & 多轮
             s.put(GraphStateKeys.HISTORY_MESSAGES, new ReplaceStrategy());
             // 可观测性
             s.put(GraphStateKeys.PHASE_LATENCIES, new ReplaceStrategy());
             s.put(GraphStateKeys.PHASE_LOG, new ReplaceStrategy());
+            s.put(GraphStateKeys.PHASE_LATENCIES, new MergeStrategy());
+            s.put(GraphStateKeys.PHASE_LOG, new AppendStrategy());
             return s;
         };
     }
@@ -124,6 +128,7 @@ public class MainGraphConfig {
                 .addNode(NODE_INTENT, node_async(intentNode))
                 .addNode(NODE_FEATURE_RESOLVE, node_async(featureResolveNode))
                 .addNode(NODE_DOC_RETRIEVE, node_async(docRetrieveNode))
+                .addNode(NODE_FAQ_RETRIEVE, node_async(faqRetrieveNode))   // ★
                 .addNode(NODE_MERGER, node_async(mergerNode))
                 .addNode(NODE_CHITCHAT_ANSWER, node_async(chitchatAnswerNode))
                 .addNode(NODE_KNOWLEDGE_ANSWER, node_async(knowledgeAnswerNode))
@@ -141,9 +146,12 @@ public class MainGraphConfig {
                                 NODE_CHITCHAT_ANSWER, NODE_CHITCHAT_ANSWER,
                                 NODE_FEATURE_RESOLVE, NODE_FEATURE_RESOLVE
                         ))
-                // ============ 主链路 ============
+                // ============ ★ 并行 fan-out: feature_resolve → doc_retrieve / faq_retrieve ============
                 .addEdge(NODE_FEATURE_RESOLVE, NODE_DOC_RETRIEVE)
+                .addEdge(NODE_FEATURE_RESOLVE, NODE_FAQ_RETRIEVE)
+                // ============ ★ 并行 fan-in: doc_retrieve / faq_retrieve → merger ============
                 .addEdge(NODE_DOC_RETRIEVE, NODE_MERGER)
+                .addEdge(NODE_FAQ_RETRIEVE, NODE_MERGER)
                 // ============ 分流 ② merger 之后: 三选一 ============
                 .addConditionalEdges(
                         NODE_MERGER,
@@ -161,15 +169,13 @@ public class MainGraphConfig {
                 .addEdge(NODE_FINALIZE, StateGraph.END);
 
         CompiledGraph compiled = graph.compile();
-        log.info("[MainGraphConfig] mainGraph compiled: 10 nodes, 2 conditionalEdges (3.B 真实 Multi-Agent 骨架, 做法 X)");
+        log.info("[MainGraphConfig] mainGraph compiled: 11 nodes, 2 conditionalEdges, "
+                + "1 parallel fanout (第四刀: Doc + FAQ 并行检索)");
         return compiled;
     }
 
-    // ==================== ConditionalEdge 判定 ====================
+    // ==================== ConditionalEdge 判定 (未改动) ====================
 
-    /**
-     * intent 之后的分流: chitchat → 短路, 其他 → 继续主链路.
-     */
     private String routeAfterIntent(OverAllState state) {
         Intent intent = state.value(GraphStateKeys.INTENT, Intent.class).orElse(Intent.DEFAULT);
         if (RouteUtil.isChitchat(intent)) {
@@ -179,13 +185,7 @@ public class MainGraphConfig {
         return NODE_FEATURE_RESOLVE;
     }
 
-    /**
-     * merger 之后的分流: admin_meta > ticket > knowledge (默认兜底).
-     *
-     * <p><b>判定优先级</b> (高 → 低): admin_meta_query > ticket_intent > knowledge_answer.</p>
-     */
     private String routeAfterMerger(OverAllState state) {
-        // 优先用 enhancedMessage (含图片描述), 没有就 fallback userMessage
         String query = state.value(GraphStateKeys.ENHANCED_MESSAGE, String.class)
                 .orElse(state.value(GraphStateKeys.USER_MESSAGE, String.class).orElse(""));
         String userRole = state.value(GraphStateKeys.USER_ROLE, String.class).orElse("user");

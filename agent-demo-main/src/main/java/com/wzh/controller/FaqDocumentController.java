@@ -5,8 +5,8 @@ import com.wzh.common.Result;
 import com.wzh.entity.FaqDocument;
 import com.wzh.entity.dto.FaqDocumentDTO;
 import com.wzh.entity.dto.PageRequest;
-import com.wzh.service.AgentService;
 import com.wzh.service.FaqDocumentService;
+import com.wzh.service.FaqVectorizeService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -16,7 +16,8 @@ import org.springframework.web.bind.annotation.*;
 public class FaqDocumentController {
 
     private final FaqDocumentService faqDocumentService;
-    private final AgentService agentService;
+    /** 第四刀: FAQ 学习改走独立服务 (不再调 AgentService.learnFaq) */
+    private final FaqVectorizeService faqVectorizeService;
 
     /** 新增 FAQ */
     @PostMapping
@@ -50,10 +51,10 @@ public class FaqDocumentController {
         return Result.success();
     }
 
-    /** 学习 FAQ（向量化） */
+    /** 学习 FAQ（向量化）— 第四刀改走 FaqVectorizeService → faq_vectors */
     @PostMapping("/{id}/learn")
     public Result<Void> learn(@PathVariable Long id) {
-        agentService.learnFaq(id);
+        faqVectorizeService.learnFaq(id);
         return Result.success();
     }
 }

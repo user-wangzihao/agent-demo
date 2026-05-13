@@ -13,6 +13,7 @@ import com.wzh.entity.dto.FaqDocumentDTO;
 import com.wzh.entity.dto.PageRequest;
 import com.wzh.mapper.FaqDocumentMapper;
 import com.wzh.service.FaqDocumentService;
+import com.wzh.service.FaqMilvusService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -26,6 +27,8 @@ public class FaqDocumentServiceImpl extends ServiceImpl<FaqDocumentMapper, FaqDo
         implements FaqDocumentService {
 
     private final ObjectMapper objectMapper;
+    /** 第四刀: 删除/更新 FAQ 时联动清理 faq_vectors */
+    private final FaqMilvusService faqMilvusService;
 
     @Override
     public Long addFaq(FaqDocumentDTO dto) {
@@ -39,7 +42,13 @@ public class FaqDocumentServiceImpl extends ServiceImpl<FaqDocumentMapper, FaqDo
         if (dto.getId() == null) throw new RuntimeException("更新时ID不能为空");
         FaqDocument entity = toEntity(dto);
         entity.setId(dto.getId());
+        // 第四刀: 任一内容字段被改, 标记需要重新学习 (不自动重学, 保持可控)
+        entity.setVectorized(0);
         this.updateById(entity);
+        // 联动清理旧向量, 避免"老内容 + 老向量"被检索召回造成不一致
+        // (vectorized=0 时 FAQ 不应该出现在检索结果里; 这里先清, 等用户手动点"学习")
+        faqMilvusService.deleteByFaqId(dto.getId());
+        log.info("FAQ [{}] 已更新, 旧向量已清除, vectorized 重置为 0", dto.getId());
     }
 
     @Override
@@ -63,9 +72,12 @@ public class FaqDocumentServiceImpl extends ServiceImpl<FaqDocumentMapper, FaqDo
     @Override
     public void deleteFaq(Long id) {
         this.removeById(id);
+        // 第四刀: MySQL 软删后, 联动清 Milvus, 避免"鬼向量"被召回
+        faqMilvusService.deleteByFaqId(id);
+        log.info("FAQ [{}] 已软删除, 关联向量已清除", id);
     }
 
-    // ========== 转换 ==========
+    // ========== 转换 (未改动) ==========
 
     private FaqDocument toEntity(FaqDocumentDTO dto) {
         FaqDocument entity = new FaqDocument();

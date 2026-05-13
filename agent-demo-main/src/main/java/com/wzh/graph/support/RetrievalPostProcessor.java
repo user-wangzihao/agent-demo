@@ -3,6 +3,7 @@ package com.wzh.graph.support;
 import cn.hutool.core.util.StrUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wzh.service.AgentService;
+import com.wzh.service.MilvusService;
 import com.wzh.service.MilvusService.SearchResult;
 
 import java.util.*;
@@ -139,4 +140,52 @@ public final class RetrievalPostProcessor {
                 })
                 .collect(Collectors.toList());
     }
+
+    /**
+     * 把 FAQ chunks 转为 SourceInfo 列表 (第四刀引入).
+     *
+     * <p><b>过滤规则</b>: 沿用文档侧约定, 过滤掉 chunk_type='image_description'
+     * 的图片描述 chunk —— 它们参与召回但不出现在前端"来源"列表里
+     * (避免一堆"图片描述"作为来源展示).</p>
+     *
+     * <p><b>字段复用约定</b>: SourceInfo 仅 3 个字段, FAQ 来源不引入新字段:
+     * <ul>
+     *   <li>featureName: <b>FAQ 类型下承载"问题摘要"</b> (最长 30 字), 文档类型下仍是功能名</li>
+     *   <li>chunkType="FAQ": 让前端识别这是 FAQ 来源, 据此选择展示形式</li>
+     *   <li>score: 检索相关度 (注意 Doc 和 FAQ 走不同 collection, 分数不可跨类型比较)</li>
+     * </ul>
+     * 这个约定是临时的: 第六刀 SourceInfo 迁出 AgentService 时, 可以重构成
+     * 多态 / sealed interface / DTO 拆分等更优雅的形式. 当前阶段先复用字段.</p>
+     */
+    public static List<AgentService.SourceInfo> toFaqSourceInfoList(
+            List<MilvusService.SearchResult> faqResults) {
+        if (faqResults == null || faqResults.isEmpty()) return new ArrayList<>();
+        List<AgentService.SourceInfo> sources = new ArrayList<>();
+        for (MilvusService.SearchResult sr : faqResults) {
+            if ("image_description".equals(sr.chunkType)) continue;
+            AgentService.SourceInfo si = new AgentService.SourceInfo();
+            si.featureName = extractQuestionFromFaqContent(sr.content);   // ← 装问题摘要
+            si.chunkType = "FAQ";
+            si.score = sr.score;
+            sources.add(si);
+        }
+        return sources;
+    }
+
+    /**
+     * 从 FAQ 主 chunk 的 content 里提取 "问题: " 后的文本作为来源标题.
+     * 截断到 30 字以内. 解析不到则降级为 content 前 30 字.
+     */
+    private static String extractQuestionFromFaqContent(String content) {
+        if (content == null) return "";
+        int idx = content.indexOf("问题: ");
+        if (idx < 0) {
+            return content.length() > 30 ? content.substring(0, 30) + "..." : content;
+        }
+        int start = idx + "问题:".length();   // 跳过 "问题:"，不算后面的空格
+        int end = content.indexOf("\n", start);
+        String question = (end < 0 ? content.substring(start) : content.substring(start, end)).trim();
+        return question.length() > 30 ? question.substring(0, 30) + "..." : question;
+    }
+
 }

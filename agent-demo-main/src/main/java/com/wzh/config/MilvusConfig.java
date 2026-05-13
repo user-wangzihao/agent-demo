@@ -17,6 +17,7 @@ public class MilvusConfig {
     private String host;
     private int port;
     private String collectionName;
+    private String faqCollectionName;
 
     @Bean
     public MilvusClientV2 milvusClient() {
