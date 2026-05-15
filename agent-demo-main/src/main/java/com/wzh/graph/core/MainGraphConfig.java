@@ -6,8 +6,6 @@ import com.alibaba.cloud.ai.graph.KeyStrategyFactory;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
-import com.alibaba.cloud.ai.graph.state.strategy.AppendStrategy;
-import com.alibaba.cloud.ai.graph.state.strategy.MergeStrategy;
 import com.alibaba.cloud.ai.graph.state.strategy.ReplaceStrategy;
 import com.wzh.enums.Intent;
 import com.wzh.graph.node.*;
@@ -110,11 +108,14 @@ public class MainGraphConfig {
             s.put(GraphStateKeys.FINAL_ANSWER, new ReplaceStrategy());
             // 流式 & 多轮
             s.put(GraphStateKeys.HISTORY_MESSAGES, new ReplaceStrategy());
-            // 可观测性
+            // 可观测性 (第六刀 Batch 1):
+            // 之所以用 ReplaceStrategy 而非 Append/Merge: CompiledGraph 是 @Bean 单例,
+            // 框架内部会跨调用复用 OverAllState, AppendStrategy 会把上次的 phaseLog
+            // 一直 concat 下去 (实测: 新 sessionId 的请求 phaseLog 里依然带着上几次的全部记录).
+            // 改为 Replace + 节点内 read-modify-write (基类 AbstractGraphNode 实现),
+            // 配合 Controller 入口显式 put 空集合, 双保险.
             s.put(GraphStateKeys.PHASE_LATENCIES, new ReplaceStrategy());
             s.put(GraphStateKeys.PHASE_LOG, new ReplaceStrategy());
-            s.put(GraphStateKeys.PHASE_LATENCIES, new MergeStrategy());
-            s.put(GraphStateKeys.PHASE_LOG, new AppendStrategy());
             return s;
         };
     }

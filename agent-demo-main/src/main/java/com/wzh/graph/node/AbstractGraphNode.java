@@ -74,14 +74,23 @@ public abstract class AbstractGraphNode implements NodeAction {
     /**
      * 在 partial state 里追加一行 phaseLog.
      *
-     * <p>read-modify-write: 先读 state 已有的 phaseLog (可能为空),
-     * 添加新行, 写回 partial. 多次调用会累加.</p>
+     * <p><b>read-modify-write (第六刀 Batch 1 改造)</b>:
+     * <ol>
+     *   <li>读 state 已有的完整 list (上游节点累计的)</li>
+     *   <li>若 partial 里也已经有 (本节点之前调用过), 优先用 partial 的 (避免重复读 state)</li>
+     *   <li>append 本节点新增行</li>
+     *   <li>写回 partial 完整 list</li>
+     * </ol>
+     * 配合 KeyStrategy = ReplaceStrategy: 下游节点 partial 写回时整体覆盖, 不依赖 AppendStrategy.
+     * 这样 CompiledGraph 跨调用复用 OverAllState 时, Controller 入口手动塞空 list 就能彻底清零.</p>
      */
     @SuppressWarnings("unchecked")
     protected void appendPhaseLog(OverAllState state, Map<String, Object> partial, String line) {
         List<String> log = (List<String>) partial.get(GraphStateKeys.PHASE_LOG);
         if (log == null) {
-            log = new ArrayList<>();   // 只放本节点新增, AppendStrategy 会自动 concat 历史
+            // 从 state 读取上游累计, 拷贝一份避免污染 state 原对象
+            List<String> existing = (List<String>) state.value(GraphStateKeys.PHASE_LOG).orElse(null);
+            log = existing == null ? new ArrayList<>() : new ArrayList<>(existing);
         }
         log.add(line);
         partial.put(GraphStateKeys.PHASE_LOG, log);
@@ -90,14 +99,17 @@ public abstract class AbstractGraphNode implements NodeAction {
     /**
      * 在 partial state 里追加一条 phaseLatencies.
      *
-     * <p>read-modify-write: 先读 state 已有的 Map (可能为空), put 新条目, 写回 partial.</p>
+     * <p>read-modify-write 语义同 {@link #appendPhaseLog}, 见上方注释.</p>
      */
     @SuppressWarnings("unchecked")
     protected void appendPhaseLatency(OverAllState state, Map<String, Object> partial,
                                       String nodeName, long costMs) {
         Map<String, Long> map = (Map<String, Long>) partial.get(GraphStateKeys.PHASE_LATENCIES);
         if (map == null) {
-            map = new HashMap<>();   // 只放本节点新增, MergeStrategy 会自动 putAll 历史
+            // 从 state 读取上游累计, 拷贝一份避免污染 state 原对象
+            Map<String, Long> existing = (Map<String, Long>) state
+                    .value(GraphStateKeys.PHASE_LATENCIES).orElse(null);
+            map = existing == null ? new HashMap<>() : new HashMap<>(existing);
         }
         map.put(nodeName, costMs);
         partial.put(GraphStateKeys.PHASE_LATENCIES, map);

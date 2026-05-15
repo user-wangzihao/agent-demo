@@ -61,6 +61,10 @@ public class MainGraphController {
         putIfPresent(initial, GraphStateKeys.SESSION_ID, body.get("sessionId"));
         putIfPresent(initial, GraphStateKeys.USER_IMAGE_URLS, body.get("userImageUrls"));
         putIfPresent(initial, GraphStateKeys.SELECTED_FEATURE_NAME, body.get("selectedFeatureName"));
+        // 第六刀 Batch 1: 显式重置可观测性字段,
+        // 避免 CompiledGraph 单例跨调用复用 OverAllState 导致 phaseLog 累加.
+        initial.put(GraphStateKeys.PHASE_LOG, new java.util.ArrayList<String>());
+        initial.put(GraphStateKeys.PHASE_LATENCIES, new HashMap<String, Long>());
 
         Optional<OverAllState> result = mainGraph.invoke(initial);
 

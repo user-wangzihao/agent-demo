@@ -127,6 +127,10 @@ public class MainGraphSseController {
         TokenSinkRegistry.bind(execId, sink);
         initial.put(TokenSinkRegistry.EXECUTION_ID_KEY, execId);
         initial.put(GraphStateKeys.HISTORY_MESSAGES, history);
+        // 第六刀 Batch 1: 显式重置可观测性字段,
+        // 避免 CompiledGraph 单例跨调用复用 OverAllState 导致 phaseLog 累加.
+        initial.put(GraphStateKeys.PHASE_LOG, new ArrayList<String>());
+        initial.put(GraphStateKeys.PHASE_LATENCIES, new HashMap<String, Long>());
 
         // 7. 异步执行 Graph stream
         new Thread(() -> {
