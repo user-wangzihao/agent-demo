@@ -96,7 +96,7 @@ minio:
   bucket-name: agent-demo
 
 milvus:
-  host: 10.82.12.51
+  host: 10.82.13.61
   port: 19530
   collection-name: feature_document_vectors
   faq-collection-name: faq_vectors

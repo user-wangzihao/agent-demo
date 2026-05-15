@@ -9,13 +9,13 @@ import org.springaicommunity.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
 
 /**
- * 工单相关工具（2 个）：
- *   submitTicket        — 提交工单（需要用户上下文，从 McpMeta 取）
+ * 工单相关工具(2 个):
+ *   submitTicket        — 提交工单(需要用户上下文,从 McpMeta 取)
  *   queryTicketStatus   — 查询工单状态
  *
- * 注意：这里使用 @McpTool 注解（来自 org.springaicommunity.mcp.annotation），
- * 而不是 Spring AI 主库的 @Tool，因为 @McpTool 支持 McpMeta 特殊参数自动注入。
- * @McpMeta 参数不会出现在工具的 JSON schema 里，大模型看不到也填不了。
+ * 注意:这里使用 @McpTool 注解(来自 org.springaicommunity.mcp.annotation),
+ * 而不是 Spring AI 主库的 @Tool,因为 @McpTool 支持 McpMeta 特殊参数自动注入。
+ * @McpMeta 参数不会出现在工具的 JSON schema 里,大模型看不到也填不了。
  */
 @Slf4j
 @Component
@@ -27,36 +27,37 @@ public class TicketTools {
     @McpTool(
             name = "submitTicket",
             description = """
-                    当用户明确要求转交技术人员处理、或当前问题超出知识库范围无法回答时，调用此工具创建工单。
-                    调用前先向用户确认是否愿意转交人工，获得同意后再调用。
+                    当用户明确要求转交技术人员处理、或当前问题超出知识库范围无法回答时,调用此工具创建工单。
+                    调用前先向用户确认是否愿意转交人工,获得同意后再调用。
                     
-                    模型只需填写 title / description / priority 三个参数，
-                    userId / userName / sessionId 会由系统自动从上下文注入，模型无需关心。
+                    模型只需填写 title / description / priority 三个参数,
+                    userId / userName / sessionId / featureName / chatHistoryJson 会由系统自动从上下文注入,模型无需关心。
                     """
     )
     public String submitTicket(
-            @McpToolParam(description = "工单标题，一句话概括用户核心问题，不超过 50 字", required = true)
+            @McpToolParam(description = "工单标题,一句话概括用户核心问题,不超过 50 字", required = true)
             String title,
 
-            @McpToolParam(description = "问题详细描述，包括现象、已尝试操作、期望结果", required = true)
+            @McpToolParam(description = "问题详细描述,包括现象、已尝试操作、期望结果", required = true)
             String description,
 
-            @McpToolParam(description = "优先级：LOW(低) / NORMAL(普通) / HIGH(高) / URGENT(紧急)", required = true)
+            @McpToolParam(description = "优先级:LOW(低) / NORMAL(普通) / HIGH(高) / URGENT(紧急)", required = true)
             String priority,
 
-            // McpMeta 是特殊参数，不会出现在工具 schema 里，由 MCP 框架自动从客户端 meta 注入
             McpMeta meta
     ) {
-        // 从 meta 中取出主应用透传的上下文
-        String userId = getString(meta, "userId", "unknown");
-        String userName = getString(meta, "userName", "未知用户");
-        Long sessionId = getLong(meta, "sessionId", 0L);
+        String userId          = getString(meta, "userId", "unknown");
+        String userName        = getString(meta, "userName", "未知用户");
+        Long   sessionId       = getLong  (meta, "sessionId", 0L);
+        String featureName     = getString(meta, "featureName", "通用FAQ");
+        // 第五刀 Batch 2:完整对话历史 JSON,供工单详情页"对话历史"卡片渲染
+        String chatHistoryJson = getString(meta, "chatHistoryJson", "[]");
 
-        log.info("[MCP Tool] submitTicket title={}, userId={}, sessionId={}",
-                title, userId, sessionId);
+        log.info("[MCP Tool] submitTicket title={}, userId={}, sessionId={}, feature={}, historyLen={}",
+                title, userId, sessionId, featureName, chatHistoryJson.length());
 
         return ticketSystemClient.submitTicket(
-                title, description, priority, userId, userName, sessionId);
+                title, description, priority, userId, userName, sessionId, featureName, chatHistoryJson);
     }
 
     @McpTool(
@@ -67,7 +68,7 @@ public class TicketTools {
                     """
     )
     public String queryTicketStatus(
-            @McpToolParam(description = "工单号，格式如 TK20250420001", required = true)
+            @McpToolParam(description = "工单号,格式如 TK20250420001", required = true)
             String ticketNo
     ) {
         log.info("[MCP Tool] queryTicketStatus ticketNo={}", ticketNo);
@@ -79,7 +80,9 @@ public class TicketTools {
     private String getString(McpMeta meta, String key, String defaultValue) {
         if (meta == null) return defaultValue;
         Object v = meta.get(key);
-        return v == null ? defaultValue : String.valueOf(v);
+        if (v == null) return defaultValue;
+        String s = String.valueOf(v);
+        return s.isBlank() ? defaultValue : s;
     }
 
     private Long getLong(McpMeta meta, String key, Long defaultValue) {

@@ -40,11 +40,13 @@ public class TicketSystemClient {
 
     /**
      * 提交工单。
-     * 注意请求体字段必须与 TicketSystem 的 CreateTicketRequest 一致：
+     * 注意请求体字段必须与 TicketSystem 的 CreateTicketRequest 一致:
      *   source / userId / userName / title / description / agentSessionId / priority
+     *   / relatedFeatureId / relatedFeatureName  (第五刀新增)
      */
     public String submitTicket(String title, String description, String priority,
-                               String userId, String userName, Long sessionId) {
+                               String userId, String userName, Long sessionId,
+                               String featureName, String chatHistoryJson) {
         try {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("source", "AgentDemo");
@@ -54,6 +56,11 @@ public class TicketSystemClient {
             body.put("description", description);
             body.put("agentSessionId", sessionId == null ? null : String.valueOf(sessionId));
             body.put("priority", priority == null ? "NORMAL" : priority);
+            // 第五刀新增:feature_name 透传(featureId 暂时为空,TicketSystem 侧默认 NULL)
+            body.put("relatedFeatureId", null);
+            body.put("relatedFeatureName",
+                    (featureName == null || featureName.isBlank()) ? "通用FAQ" : featureName);
+            body.put("chatHistory", chatHistoryJson == null ? "[]" : chatHistoryJson);
 
             String bodyJson = objectMapper.writeValueAsString(body);
 

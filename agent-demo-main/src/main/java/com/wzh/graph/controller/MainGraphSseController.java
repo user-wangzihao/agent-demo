@@ -68,20 +68,25 @@ public class MainGraphSseController {
         SseEmitter emitter = new SseEmitter(300_000L);
         TokenUtil.TokenInfo tokenInfo = UserContext.get();  // 跨线程传播
 
-        // 1. 解析输入
-        String userMessage = String.valueOf(body.getOrDefault("userMessage", ""));
-        String userRole = String.valueOf(body.getOrDefault("userRole", "user"));
-        Long userId = toLong(body.get("userId"));
-        String userName = body.get("userName") == null ? "" : String.valueOf(body.get("userName"));
+        // 1. 解析输入:用户身份从 UserContext(token)取
+        if (tokenInfo == null) {
+            emitter.completeWithError(new RuntimeException("未登录"));
+            return emitter;
+        }
+        Long userId = tokenInfo.userId;
+        String userRole = tokenInfo.role;
+        String userName = lookupNickname(userId, tokenInfo.username);
+
+        String userMessage = String.valueOf(body.getOrDefault("message", ""));
         Long incomingSessionId = body.get("sessionId") == null ? null : toLong(body.get("sessionId"));
         @SuppressWarnings("unchecked")
-        List<String> userImageUrls = (List<String>) body.get("userImageUrls");
+        List<String> userImageUrls = (List<String>) body.get("imageUrls");
         String selectedFeatureName = body.get("selectedFeatureName") == null ? null
                 : String.valueOf(body.get("selectedFeatureName"));
 
-        // 2. session 处理: 没有则创建, 同时落库用户消息 (对齐 AgentService 行为)
+        // 2. session 处理
         Long sessionId = ensureSession(incomingSessionId, userId);
-        saveUserMessage(sessionId, userMessage, userImageUrls);
+        Long currentUserMessageId = saveUserMessage(sessionId, userMessage, userImageUrls);
 
         // 3. 加载 history (排除当前用户消息)
         List<ChatMessage> history = loadHistoryExcludingCurrent(sessionId);
@@ -89,11 +94,14 @@ public class MainGraphSseController {
         // 4. 答案收集缓冲 + sources/images 捕获 (用于 done 时落库)
         StringBuilder fullAnswer = new StringBuilder();
         AtomicBoolean metaEmitted = new AtomicBoolean(false);
-        // 用单元素数组当"effectively final 容器"传给 lambda
         @SuppressWarnings("unchecked")
         List<String>[] capturedImages = new List[]{Collections.emptyList()};
         @SuppressWarnings("unchecked")
         List<SourceInfo>[] capturedSources = new List[]{Collections.emptyList()};
+
+        // 第五刀 hotfix: 捕获 intent 和 matchedFeature, 用于回填 chat_message.feature_name
+        String[] capturedFeature = new String[]{null};
+        Intent[] capturedIntent = new Intent[]{null};
 
         // 5. TokenStreamSink: 桥接到 SseEmitter "token" 事件
         TokenStreamSink sink = delta -> {
@@ -126,6 +134,12 @@ public class MainGraphSseController {
             try {
                 mainGraph.stream(initial)
                         .doOnNext(no -> {
+                            // 捕获 intent / matchedFeature (用于回填 chat_message.feature_name)
+                            no.state().value(GraphStateKeys.INTENT, Intent.class)
+                                    .ifPresent(v -> capturedIntent[0] = v);
+                            no.state().value(GraphStateKeys.MATCHED_FEATURE, String.class)
+                                    .ifPresent(v -> capturedFeature[0] = v);
+
                             // intent 完成 → 若 chitchat, 立即推空 meta (方案 Y)
                             if ("intent".equals(no.node()) && !metaEmitted.get()) {
                                 Intent intent = no.state()
@@ -158,7 +172,10 @@ public class MainGraphSseController {
                                 fullAnswer.toString(),
                                 capturedImages[0],
                                 capturedSources[0],
-                                history.size()))
+                                history.size(),
+                                currentUserMessageId,
+                                capturedIntent[0],
+                                capturedFeature[0]))
                         .doOnError(err -> handleError(
                                 emitter,
                                 err instanceof Exception ? (Exception) err : new RuntimeException(err)))
@@ -172,6 +189,21 @@ public class MainGraphSseController {
         }, "graph-sse-" + sessionId).start();
 
         return emitter;
+    }
+
+    /**
+     * 查询用户 nickname,失败时回退到 username。
+     */
+    private String lookupNickname(Long userId, String fallbackUsername) {
+        try {
+            com.wzh.agentdemo.common.entity.SysUser user = sysUserMapper.selectById(userId);
+            if (user != null && user.getNickname() != null && !user.getNickname().isBlank()) {
+                return user.getNickname();
+            }
+        } catch (Exception e) {
+            log.warn("查询 nickname 失败 userId={}", userId, e);
+        }
+        return fallbackUsername == null ? "" : fallbackUsername;
     }
 
     // ==================== meta / done / error 发送 ====================
@@ -192,13 +224,31 @@ public class MainGraphSseController {
 
     private void handleDone(SseEmitter emitter, Long sessionId, String fullContent,
                             List<String> relatedImages, List<SourceInfo> sources,
-                            int historySize) {
+                            int historySize,
+                            Long currentUserMessageId,
+                            Intent intent,
+                            String matchedFeature) {
         try {
-            // 落库 assistant 消息
+            // 第五刀 hotfix: 计算本轮的 feature_name
+            // - chitchat → "Chit"
+            // - matchedFeature 有值 → matchedFeature
+            // - 否则 → null
+            String featureName = resolveFeatureNameForMessage(intent, matchedFeature);
+
+            // 回填当前 user 消息的 feature_name
+            if (currentUserMessageId != null) {
+                ChatMessage userUpdate = new ChatMessage();
+                userUpdate.setId(currentUserMessageId);
+                userUpdate.setFeatureName(featureName);
+                chatMessageMapper.updateById(userUpdate);
+            }
+
+            // 落库 assistant 消息(带 feature_name)
             ChatMessage msg = new ChatMessage();
             msg.setSessionId(sessionId);
             msg.setRole("assistant");
             msg.setContent(fullContent);
+            msg.setFeatureName(featureName);
             msg.setRelatedImages(objectMapper.writeValueAsString(
                     relatedImages == null ? Collections.emptyList() : relatedImages));
             msg.setSources(objectMapper.writeValueAsString(
@@ -216,6 +266,22 @@ public class MainGraphSseController {
             log.error("完成处理失败", e);
             emitter.completeWithError(e);
         }
+    }
+
+    /**
+     * 计算本轮消息的 feature_name 标签。
+     * - 闲聊意图 → "Chit"
+     * - matchedFeature 有值且非空白 → matchedFeature 本身
+     * - 其他(主链路但未匹配到 feature)→ null
+     */
+    private String resolveFeatureNameForMessage(Intent intent, String matchedFeature) {
+        if (intent != null && intent.isShortCircuit()) {
+            return "Chit";
+        }
+        if (matchedFeature != null && !matchedFeature.isBlank()) {
+            return matchedFeature;
+        }
+        return null;
     }
 
     private void handleError(SseEmitter emitter, Exception error) {
@@ -239,7 +305,7 @@ public class MainGraphSseController {
         return session.getId();
     }
 
-    private void saveUserMessage(Long sessionId, String userMessage, List<String> userImageUrls) {
+    private Long saveUserMessage(Long sessionId, String userMessage, List<String> userImageUrls) {
         ChatMessage userMsg = new ChatMessage();
         userMsg.setSessionId(sessionId);
         userMsg.setRole("user");
@@ -250,6 +316,7 @@ public class MainGraphSseController {
             } catch (Exception ignored) {}
         }
         chatMessageMapper.insert(userMsg);
+        return userMsg.getId();
     }
 
     /**

@@ -1,6 +1,8 @@
 package com.wzh.graph.node;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wzh.agentdemo.common.entity.ChatMessage;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.ChatClientInvoker;
@@ -56,6 +58,7 @@ public class TicketAgentNode extends AbstractGraphNode {
             """;
 
     private final ChatClient mcpChatClient;
+    private final ObjectMapper objectMapper;
 
     @Override
     protected String nodeId() {
@@ -108,15 +111,88 @@ public class TicketAgentNode extends AbstractGraphNode {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private Map<String, Object> buildToolContext(OverAllState state) {
-        Object userIdObj = state.value(GraphStateKeys.USER_ID).orElse(null);
-        Object userNameObj = state.value(GraphStateKeys.USER_NAME).orElse(null);
+        Object userIdObj    = state.value(GraphStateKeys.USER_ID).orElse(null);
+        Object userNameObj  = state.value(GraphStateKeys.USER_NAME).orElse(null);
         Object sessionIdObj = state.value(GraphStateKeys.SESSION_ID).orElse(null);
+
+        // matchedFeature 解析,带 history 回溯
+        String matchedFeature = resolveFeatureWithFallback(state);
+
+        // 第五刀 Batch 2:把 history + 当前 query 序列化为 chatHistoryJson,
+        // 透传给 TicketSystem 用于工单详情页"对话历史"卡片渲染
+        String chatHistoryJson = buildChatHistoryJson(state);
+
+        // Map.of 上限是 10 个键, 这里 5 个,后续如再加要换 Map.ofEntries
         return Map.of(
-                "userId", userIdObj == null ? "unknown" : String.valueOf(userIdObj),
-                "userName", userNameObj == null ? "未知用户" : String.valueOf(userNameObj),
-                "sessionId", sessionIdObj == null ? 0L : toLong(sessionIdObj)
+                "userId",          userIdObj    == null ? "unknown"  : String.valueOf(userIdObj),
+                "userName",        userNameObj  == null ? "未知用户"  : String.valueOf(userNameObj),
+                "sessionId",       sessionIdObj == null ? 0L         : toLong(sessionIdObj),
+                "featureName",     matchedFeature == null ? "通用FAQ" : matchedFeature,
+                "chatHistoryJson", chatHistoryJson
         );
+    }
+
+    /**
+     * 把 history + 当前用户消息序列化为 JSON 字符串,作为工单的完整对话上下文。
+     * <p>格式:{@code [{"role":"user","content":"..."},{"role":"assistant","content":"..."},...]}
+     * 末尾追加当前用户消息(history 中不含)。失败时返回 "[]"。</p>
+     */
+    @SuppressWarnings("unchecked")
+    private String buildChatHistoryJson(OverAllState state) {
+        try {
+            List<ChatMessage> history = (List<ChatMessage>) state
+                    .value(GraphStateKeys.HISTORY_MESSAGES).orElse(Collections.emptyList());
+            String currentMessage = state.value(GraphStateKeys.USER_MESSAGE, String.class).orElse("");
+
+            List<Map<String, String>> messages = new ArrayList<>();
+            for (ChatMessage m : history) {
+                Map<String, String> msg = new HashMap<>();
+                msg.put("role", m.getRole());
+                msg.put("content", m.getContent());
+                messages.add(msg);
+            }
+            // 当前 user 消息追加在末尾
+            if (currentMessage != null && !currentMessage.isBlank()) {
+                Map<String, String> last = new HashMap<>();
+                last.put("role", "user");
+                last.put("content", currentMessage);
+                messages.add(last);
+            }
+            return objectMapper.writeValueAsString(messages);
+        } catch (JsonProcessingException e) {
+            log.warn("[{}] chatHistory 序列化失败, 返回空数组", NODE_ID, e);
+            return "[]";
+        }
+    }
+
+    /**
+     * matchedFeature 解析,带 history 回溯兜底。
+     * 解析顺序:
+     *   1. 当前 state 的 MATCHED_FEATURE(本轮 FeatureResolveNode 输出)
+     *   2. 倒序遍历 history, 找最近一条 featureName 非空且不是 "Chit" 的消息
+     *   3. 都没找到 → null (上层会兜底为 "通用FAQ")
+     */
+    @SuppressWarnings("unchecked")
+    private String resolveFeatureWithFallback(OverAllState state) {
+        // 第一层:当前轮
+        String current = state.value(GraphStateKeys.MATCHED_FEATURE, String.class).orElse(null);
+        if (current != null && !current.isBlank()) {
+            return current;
+        }
+        // 第二层:回溯 history
+        List<ChatMessage> history = (List<ChatMessage>) state
+                .value(GraphStateKeys.HISTORY_MESSAGES).orElse(Collections.emptyList());
+        for (int i = history.size() - 1; i >= 0; i--) {
+            ChatMessage m = history.get(i);
+            String fn = m.getFeatureName();
+            if (fn != null && !fn.isBlank() && !"Chit".equals(fn)) {
+                log.info("[{}] feature 从 history 回溯命中: {}", NODE_ID, fn);
+                return fn;
+            }
+        }
+        return null;
     }
 
     private long toLong(Object o) {
