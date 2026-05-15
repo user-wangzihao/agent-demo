@@ -13,6 +13,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -54,13 +55,20 @@ public class AdminAgentNode extends AbstractGraphNode {
             - timeRange: this_week / last_week / this_month / last_30_days
             - 拿到统计后用自然语言组织分析报告, 重点说亮点 + 需要关注的问题
             
+            【retrievalSource】— 查询会话最近一次 AI 回答的知识来源
+            - 用户追问"刚才的回答来自哪篇文档/来源是什么"时调用
+            - 需传入当前 sessionId
+            
             === 必须遵守 ===
             - 仅在确实需要时调用工具; 简单问候等直接回答
-            - 不要调用 submitTicket / queryTicketStatus (这是用户工具, 管理员场景用不到)
             - 使用中文回答
             """;
 
-    private final ChatClient mcpChatClient;
+    // 第六刀 Batch 2: 改注入 adminChatClient — 仅含 listDocumentStatus / analyzeUsageStats /
+    // triggerKnowledgeLearning / retrievalSource 四个管理员工具, 不含 submitTicket / queryTicketStatus,
+    // 物理阻断管理员误触发工单创建.
+    @Qualifier("adminChatClient")
+    private final ChatClient adminChatClient;
 
     @Override
     protected String nodeId() {
@@ -103,7 +111,7 @@ public class AdminAgentNode extends AbstractGraphNode {
 
         Map<String, Object> toolContext = buildToolContext(state);
 
-        String answer = ChatClientInvoker.invoke(mcpChatClient, new Prompt(messages),
+        String answer = ChatClientInvoker.invoke(adminChatClient, new Prompt(messages),
                 toolContext, sink);
 
         Map<String, Object> partial = new HashMap<>();

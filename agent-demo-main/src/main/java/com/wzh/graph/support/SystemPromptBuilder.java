@@ -3,63 +3,40 @@ package com.wzh.graph.support;
 import cn.hutool.core.util.StrUtil;
 import com.wzh.enums.Intent;
 
+/**
+ * KnowledgeAnswerNode 的 system prompt 构造器.
+ *
+ * <p><b>第六刀 Batch 2 简化</b>: 工具集硬隔离落地后, 本类的两段祈祷文字被彻底删除:
+ * <ul>
+ *   <li><b>toolBoundarySection</b> (旧): 非 admin 时塞入"你只能用 submitTicket / queryTicketStatus,
+ *       其他工具即使出现在列表里也绝对不能调用"的祈祷. 现在 KnowledgeAnswerNode 注入的是
+ *       {@code knowledgeChatClient}, 工具列表里物理就不存在管理员工具, 越权调用从根上无法发生.</li>
+ *   <li><b>adminToolsSection</b> (旧): 管理员时塞入 4 个管理员工具的使用说明. 但路由层
+ *       {@code routeAfterMerger} 保证 userRole=admin 永远走 admin_agent 分支, 永远走不到
+ *       KnowledgeAnswerNode, 这段是死代码.</li>
+ * </ul>
+ * 删除后, prompt 仅保留对所有 user 角色都成立的"知识库回答规则 + 工单工具使用规则 + 意图风格".</p>
+ */
 public final class SystemPromptBuilder {
 
     private SystemPromptBuilder() {}
 
+    /**
+     * 构建 KnowledgeAnswerNode 用的 system prompt.
+     *
+     * <p>参数 {@code userRole} 在第六刀 Batch 2 之后不再影响 prompt 内容
+     * (管理员永远不会走到本节点), 仍保留入参是为了:
+     * <ol>
+     *   <li>调用方签名稳定, 无需改 4 处 Answer Node</li>
+     *   <li>未来如果需要按角色微调 prompt (如对管理员更简洁), 不用再改签名</li>
+     * </ol>
+     */
+    @SuppressWarnings("unused")
     public static String buildSystemPrompt(String retrievedContext, String userRole, Intent intent) {
-        boolean isAdmin = "admin".equals(userRole);
-
-        // 3.B hotfix: 非 admin 显式禁止越权调用工具
-        String toolBoundarySection = isAdmin ? "" : """
-                
-                === 工具使用边界 (强制约束) ===
-                
-                你只能使用以下两个工具: submitTicket, queryTicketStatus
-                其他任何工具 (如 listDocumentStatus / triggerKnowledgeLearning / analyzeUsageStats 
-                等管理员专属工具) 都不在你的权限范围内, 即使工具列表里出现, 也绝对不能调用.
-                
-                若用户询问"有哪些文档/学习情况/统计数据"等管理员专属问题, 应回答:
-                "这类知识库管理操作需要管理员权限, 我无法为您查询. 您可以联系管理员处理."
-                
-                **绝对不要输出 <tool_code> 之类的伪工具调用文本**.
-                
-                """;
-
-        String adminToolsSection = isAdmin ? """
-                
-                === 管理员专属工具 ===
-                
-                作为管理员，你还可以使用以下工具：
-                
-                【listDocumentStatus】— 查询所有文档/视频的学习状态
-                触发时机：管理员询问"学习情况怎么样"、"哪些文档已学习/未学习"、"列出文档学习详情"、"知识库状态"等时调用。
-                返回数据处理要求（必须严格执行）：
-                - 工具返回 documents 数组和 videos 数组，必须将两个数组的每一条记录都逐条列出，不得只汇报数量
-                - 文档列表格式：序号. 【文档ID: {id}】{featureName} — {status}
-                - 视频列表格式：序号. 【视频ID: {id}】{name} — {status}(所属功能ID: {featureId})
-                - 最后输出汇总：共 N 篇文档(已学习 X 篇, 未学习 Y 篇); 共 M 个视频(已学习 A 个, 未学习 B 个)
-                
-                【triggerKnowledgeLearning】— 触发知识库学习
-                触发时机：管理员说"学习所有未学习的文档"、"重新学习XX文档"、"触发学习任务"时调用。
-                - scope 参数说明：
-                  · "all_unlearned" = 学习所有未学习的内容
-                  · "doc_{id}" = 学习指定 ID 的功能文档(需先用 listDocumentStatus 获取 ID)
-                  · "video_{id}" = 学习指定 ID 的视频
-                - 学习任务是异步的，触发后立即告知用户"已触发，正在后台执行"，不要让用户等待。
-                
-                【analyzeUsageStats】— 使用情况统计分析
-                触发时机：管理员询问"本周使用情况"、"哪些用户问得最多"、"用户满意度如何"、"大屏数据"时调用。
-                - timeRange 参数：this_week(本周) / last_week(上周) / this_month(本月) / last_30_days(近30天)
-                - 拿到统计数据后，用自然语言组织成一段分析报告，重点说明亮点和需要关注的问题。
-                
-                """ : "";
-
         String intentStyleSection = buildIntentStyleSection(intent);
 
         String basePrompt = """
                 你是一个专业的软件产品技术支持助手。你的唯一知识来源是下方提供的知识片段，你必须严格基于这些知识来回答用户的问题。
-                """ + toolBoundarySection + """
                 
                 === 工单工具使用规则 ===
                 
@@ -79,7 +56,7 @@ public final class SystemPromptBuilder {
                 - 知识库有答案时,直接回答,不要提交工单
                 - 不要在没有工单编号的情况下调用 queryTicketStatus
                 
-                """ + adminToolsSection + intentStyleSection + """
+                """ + intentStyleSection + """
                 === 回答规则 ===
                 
                 【规则一:忠于知识库】

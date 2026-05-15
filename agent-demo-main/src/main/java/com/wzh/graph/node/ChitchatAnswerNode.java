@@ -11,6 +11,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -44,11 +45,13 @@ public class ChitchatAnswerNode extends AbstractGraphNode {
             1. 简短自然(1-2 句话)
             2. 友好不过度热情
             3. 不要主动转移话题
-            4. 不要调用任何工具
             使用中文回答。
             """;
 
-    private final ChatClient mcpChatClient;
+    // 第六刀 Batch 2: 改注入 chitchatChatClient (零工具) — 原 mcpChatClient 持有全部 6 个工具,
+    // 闲聊场景却把它灌进来, 既浪费 prompt token 又有越权风险, 改为零工具的专用 client.
+    @Qualifier("chitchatChatClient")
+    private final ChatClient chitchatChatClient;
 
     @Override
     protected String nodeId() {
@@ -73,7 +76,7 @@ public class ChitchatAnswerNode extends AbstractGraphNode {
         // toolContext 闲聊场景仍可传 (即使不会调用工具, 透传无副作用)
         Map<String, Object> toolContext = buildToolContext(state);
 
-        String answer = ChatClientInvoker.invoke(mcpChatClient, new Prompt(messages),
+        String answer = ChatClientInvoker.invoke(chitchatChatClient, new Prompt(messages),
                 toolContext, sink);
 
         Map<String, Object> partial = new HashMap<>();

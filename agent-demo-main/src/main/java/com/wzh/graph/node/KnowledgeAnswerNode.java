@@ -16,6 +16,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -43,7 +44,10 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
 
     private static final String NODE_ID = "knowledge_answer";
 
-    private final ChatClient mcpChatClient;
+    // 第六刀 Batch 2: 改注入 knowledgeChatClient — 仅含 submitTicket / queryTicketStatus /
+    // retrievalSource 三个用户场景工具, 物理阻断管理员专属工具的越权调用.
+    @Qualifier("knowledgeChatClient")
+    private final ChatClient knowledgeChatClient;
 
     @Override
     protected String nodeId() {
@@ -85,7 +89,7 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
         Map<String, Object> toolContext = buildToolContext(state);
 
         // 6. 调用 (双模式 by ChatClientInvoker)
-        String answer = ChatClientInvoker.invoke(mcpChatClient, new Prompt(messages),
+        String answer = ChatClientInvoker.invoke(knowledgeChatClient, new Prompt(messages),
                 toolContext, sink);
 
         Map<String, Object> partial = new HashMap<>();

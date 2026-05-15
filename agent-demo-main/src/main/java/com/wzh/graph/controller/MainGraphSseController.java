@@ -99,9 +99,14 @@ public class MainGraphSseController {
         @SuppressWarnings("unchecked")
         List<SourceInfo>[] capturedSources = new List[]{Collections.emptyList()};
 
-        // 第五刀 hotfix: 捕获 intent 和 matchedFeature, 用于回填 chat_message.feature_name
-        String[] capturedFeature = new String[]{null};
-        Intent[] capturedIntent = new Intent[]{null};
+        // 第六刀 Batch 2 hotfix v4: outboundCapture holder.
+        // 不再依赖 Spring AI Alibaba Graph 的 NodeOutput.state() 拿中间字段
+        // (v3 尝试用 NodeOutput 但类型兼容性有问题; doOnNext 中间节点 state 行为又不可靠).
+        // 改为通过 initial state 注入一个线程安全的 holder Map, 让 IntentNode / FeatureResolveNode /
+        // TicketAgentNode 在 doApply 里主动把关键字段写进去, Controller 在 doOnComplete 时直接读.
+        // 这是最稳的方案: 不依赖框架取值行为, 节点显式协议化输出.
+        java.util.concurrent.ConcurrentHashMap<String, Object> outboundCapture =
+                new java.util.concurrent.ConcurrentHashMap<>();
 
         // 5. TokenStreamSink: 桥接到 SseEmitter "token" 事件
         TokenStreamSink sink = delta -> {
@@ -131,6 +136,8 @@ public class MainGraphSseController {
         // 避免 CompiledGraph 单例跨调用复用 OverAllState 导致 phaseLog 累加.
         initial.put(GraphStateKeys.PHASE_LOG, new ArrayList<String>());
         initial.put(GraphStateKeys.PHASE_LATENCIES, new HashMap<String, Long>());
+        // 第六刀 Batch 2 hotfix v4: holder 透传给所有节点
+        initial.put(GraphStateKeys.OUTBOUND_CAPTURE, outboundCapture);
 
         // 7. 异步执行 Graph stream
         new Thread(() -> {
@@ -138,18 +145,14 @@ public class MainGraphSseController {
             try {
                 mainGraph.stream(initial)
                         .doOnNext(no -> {
-                            // 捕获 intent / matchedFeature (用于回填 chat_message.feature_name)
-                            no.state().value(GraphStateKeys.INTENT, Intent.class)
-                                    .ifPresent(v -> capturedIntent[0] = v);
-                            no.state().value(GraphStateKeys.MATCHED_FEATURE, String.class)
-                                    .ifPresent(v -> capturedFeature[0] = v);
+                            // 临时 DEBUG: 看每次 doOnNext 时节点 + outboundCapture 内容
+                            log.info("[DEBUG doOnNext] node='{}' holder={}",
+                                    no.node(), outboundCapture);
 
-                            // intent 完成 → 若 chitchat, 立即推空 meta (方案 Y)
+                            // intent 完成 → 若 chitchat 立即推空 meta (从 holder 读 intent)
                             if ("intent".equals(no.node()) && !metaEmitted.get()) {
-                                Intent intent = no.state()
-                                        .value(GraphStateKeys.INTENT, Intent.class)
-                                        .orElse(Intent.DEFAULT);
-                                if (intent.isShortCircuit()) {
+                                Intent intent = (Intent) outboundCapture.get("intent");
+                                if (intent != null && intent.isShortCircuit()) {
                                     emitMeta(emitter, sessionId,
                                             Collections.emptyList(), Collections.emptyList());
                                     metaEmitted.set(true);
@@ -171,15 +174,23 @@ public class MainGraphSseController {
                                 metaEmitted.set(true);
                             }
                         })
-                        .doOnComplete(() -> handleDone(
-                                emitter, sessionId,
-                                fullAnswer.toString(),
-                                capturedImages[0],
-                                capturedSources[0],
-                                history.size(),
-                                currentUserMessageId,
-                                capturedIntent[0],
-                                capturedFeature[0]))
+                        .doOnComplete(() -> {
+                            // v4: 直接从 outboundCapture holder 读, 不依赖 NodeOutput.state() 行为
+                            Intent finalIntent = (Intent) outboundCapture.get("intent");
+                            String finalFeature = (String) outboundCapture.get("matchedFeature");
+                            log.info("[DEBUG doOnComplete] finalIntent={} finalFeature='{}' holder={}",
+                                    finalIntent, finalFeature, outboundCapture);
+
+                            handleDone(
+                                    emitter, sessionId,
+                                    fullAnswer.toString(),
+                                    capturedImages[0],
+                                    capturedSources[0],
+                                    history.size(),
+                                    currentUserMessageId,
+                                    finalIntent,
+                                    finalFeature);
+                        })
                         .doOnError(err -> handleError(
                                 emitter,
                                 err instanceof Exception ? (Exception) err : new RuntimeException(err)))
@@ -233,14 +244,22 @@ public class MainGraphSseController {
                             Intent intent,
                             String matchedFeature) {
         try {
+            // 临时 DEBUG: 看 handleDone 收到的 intent / matchedFeature 真实值
+            log.info("[DEBUG handleDone] intent={} matchedFeature='{}' currentUserMessageId={}",
+                    intent, matchedFeature, currentUserMessageId);
+
             // 第五刀 hotfix: 计算本轮的 feature_name
-            // - chitchat → "Chit"
+            // - chitchat → "chitchat"
             // - matchedFeature 有值 → matchedFeature
             // - 否则 → null
             String featureName = resolveFeatureNameForMessage(intent, matchedFeature);
 
             // 回填当前 user 消息的 feature_name
-            if (currentUserMessageId != null) {
+            // 防御: featureName 为 null 时跳过 update — 否则 MyBatis-Plus 在 entity 全 null 时
+            // 会生成 `UPDATE chat_message    WHERE id=?` 这种无 SET 子句的非法 SQL.
+            // null 意味着"没匹配到任何 feature 且不是 chitchat", user 消息插入时 feature_name 默认就是 null,
+            // 不发起 update 即正确语义.
+            if (currentUserMessageId != null && featureName != null) {
                 ChatMessage userUpdate = new ChatMessage();
                 userUpdate.setId(currentUserMessageId);
                 userUpdate.setFeatureName(featureName);
@@ -274,13 +293,13 @@ public class MainGraphSseController {
 
     /**
      * 计算本轮消息的 feature_name 标签。
-     * - 闲聊意图 → "Chit"
+     * - 闲聊意图 → "chitchat"
      * - matchedFeature 有值且非空白 → matchedFeature 本身
      * - 其他(主链路但未匹配到 feature)→ null
      */
     private String resolveFeatureNameForMessage(Intent intent, String matchedFeature) {
         if (intent != null && intent.isShortCircuit()) {
-            return "Chit";
+            return "chitchat";
         }
         if (matchedFeature != null && !matchedFeature.isBlank()) {
             return matchedFeature;

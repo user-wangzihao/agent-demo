@@ -49,6 +49,14 @@ public class FeatureResolveNode extends AbstractGraphNode {
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.MATCHED_FEATURE, matched);
 
+        // 第六刀 Batch 2 hotfix v4: 把 matchedFeature 写进 outboundCapture holder.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outbound = (Map<String, Object>) state
+                .value(GraphStateKeys.OUTBOUND_CAPTURE).orElse(null);
+        if (outbound != null && matched != null) {
+            outbound.put("matchedFeature", matched);
+        }
+
         log.info("[{}] selected='{}' → matched={}", NODE_ID, selectedFeatureName, matched);
         appendPhaseLog(state, partial,
                 "[" + NODE_ID + "] matched=" + matched);

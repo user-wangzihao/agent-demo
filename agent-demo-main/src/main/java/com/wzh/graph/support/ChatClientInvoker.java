@@ -30,7 +30,7 @@ public final class ChatClientInvoker {
     /**
      * 执行 ChatClient 调用并返回完整答案字符串.
      *
-     * @param chatClient  Spring AI ChatClient (一般是 mcpChatClient)
+     * @param chatClient  Spring AI ChatClient (第六刀 Batch 2 起按场景分立: chitchat/knowledge/ticket/admin)
      * @param prompt      构造好的 Prompt (含 system + history + user messages)
      * @param toolContext MCP _meta 透传上下文 (userId / userName / sessionId)
      * @param sink        token sink, NOOP 表示同步模式

@@ -15,6 +15,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -52,12 +53,14 @@ public class TicketAgentNode extends AbstractGraphNode {
             === 必须遵守 ===
             - 不要在没有工单编号的情况下调用 queryTicketStatus
             - 不要尝试自己回答用户的业务问题, 你的职责是衔接工单流程
-            - 不要调用 submitTicket 之外的"创建类"工具
             
             使用中文回答, 简短专业。
             """;
 
-    private final ChatClient mcpChatClient;
+    // 第六刀 Batch 2: 改注入 ticketChatClient — 仅含 submitTicket / queryTicketStatus,
+    // 物理阻断工单 Agent 误调任何知识检索 / 管理类工具.
+    @Qualifier("ticketChatClient")
+    private final ChatClient ticketChatClient;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -84,11 +87,28 @@ public class TicketAgentNode extends AbstractGraphNode {
 
         Map<String, Object> toolContext = buildToolContext(state);
 
-        String answer = ChatClientInvoker.invoke(mcpChatClient, new Prompt(messages),
+        String answer = ChatClientInvoker.invoke(ticketChatClient, new Prompt(messages),
                 toolContext, sink);
 
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.FINAL_ANSWER, answer);
+
+        // 第六刀 Batch 2 hotfix v2: 把 history 回溯出来的 feature 写回 partial state,
+        // 让 Controller 侧的 doOnNext 能在 ticket_agent 节点完成时捕获到, 用于回填
+        // chat_message.feature_name. 否则 feature_resolve matched=null 时, 即使工单链路
+        // 实际作用在某个具体 feature 上, user 消息的 feature_name 也会留空.
+        String resolvedFeature = resolveFeatureWithFallback(state);
+        if (resolvedFeature != null && !resolvedFeature.isBlank()) {
+            partial.put(GraphStateKeys.MATCHED_FEATURE, resolvedFeature);
+
+            // v4: 同时写 holder (覆盖 FeatureResolveNode 可能写入的 null/旧值)
+            @SuppressWarnings("unchecked")
+            Map<String, Object> outbound = (Map<String, Object>) state
+                    .value(GraphStateKeys.OUTBOUND_CAPTURE).orElse(null);
+            if (outbound != null) {
+                outbound.put("matchedFeature", resolvedFeature);
+            }
+        }
 
         log.info("[{}] ticket answer ({} chars, history={}, mode={})",
                 NODE_ID, answer == null ? 0 : answer.length(), history.size(),
@@ -171,7 +191,7 @@ public class TicketAgentNode extends AbstractGraphNode {
      * matchedFeature 解析,带 history 回溯兜底。
      * 解析顺序:
      *   1. 当前 state 的 MATCHED_FEATURE(本轮 FeatureResolveNode 输出)
-     *   2. 倒序遍历 history, 找最近一条 featureName 非空且不是 "Chit" 的消息
+     *   2. 倒序遍历 history, 找最近一条 featureName 非空且不是 "chitchat" 的消息
      *   3. 都没找到 → null (上层会兜底为 "通用FAQ")
      */
     @SuppressWarnings("unchecked")
@@ -187,7 +207,7 @@ public class TicketAgentNode extends AbstractGraphNode {
         for (int i = history.size() - 1; i >= 0; i--) {
             ChatMessage m = history.get(i);
             String fn = m.getFeatureName();
-            if (fn != null && !fn.isBlank() && !"Chit".equals(fn)) {
+            if (fn != null && !fn.isBlank() && !"chitchat".equals(fn)) {
                 log.info("[{}] feature 从 history 回溯命中: {}", NODE_ID, fn);
                 return fn;
             }

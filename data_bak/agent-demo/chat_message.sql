@@ -26,7 +26,7 @@ CREATE TABLE `chat_message`  (
   `session_id` bigint NOT NULL COMMENT '会话ID',
   `role` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '角色: user / assistant',
   `content` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '消息内容',
-  `feature_name` varchar(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '本轮匹配到的功能名,Chit=闲聊,NULL=未匹配',
+  `feature_name` varchar(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '本轮匹配到的功能名,chitchat=闲聊,NULL=未匹配',
   `related_images` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '关联图片URL列表 JSON',
   `sources` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '引用来源 JSON',
   `user_images` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL COMMENT '用户上传的图片URL列表 JSON',
