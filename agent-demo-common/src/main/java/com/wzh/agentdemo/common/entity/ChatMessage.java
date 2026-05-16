@@ -19,7 +19,7 @@ public class ChatMessage {
 
     private String content;
 
-    /** 本轮匹配到的功能名:chitchat=闲聊,NULL=未匹配,其他=具体功能名 */
+    /** 本轮匹配到的功能名:chitchat=闲聊,NULL=未匹配,其他=具体功能名 (老数据可能为 "Chit") */
     private String featureName;
 
     /** JSON: 关联图片URL列表（AI回答附带的参考图片） */

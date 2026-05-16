@@ -94,20 +94,11 @@ public class TicketAgentNode extends AbstractGraphNode {
         partial.put(GraphStateKeys.FINAL_ANSWER, answer);
 
         // 第六刀 Batch 2 hotfix v2: 把 history 回溯出来的 feature 写回 partial state,
-        // 让 Controller 侧的 doOnNext 能在 ticket_agent 节点完成时捕获到, 用于回填
-        // chat_message.feature_name. 否则 feature_resolve matched=null 时, 即使工单链路
-        // 实际作用在某个具体 feature 上, user 消息的 feature_name 也会留空.
+        // 让 Controller 在 doOnNext 抢救式捕获时, ticket_agent 节点完成后能从 no.state() 读到.
+        // 这是给 controller 端的 decodeString 捕获用, 节点端不直接写 holder (v5 起放弃节点端写法).
         String resolvedFeature = resolveFeatureWithFallback(state);
         if (resolvedFeature != null && !resolvedFeature.isBlank()) {
             partial.put(GraphStateKeys.MATCHED_FEATURE, resolvedFeature);
-
-            // v4: 同时写 holder (覆盖 FeatureResolveNode 可能写入的 null/旧值)
-            @SuppressWarnings("unchecked")
-            Map<String, Object> outbound = (Map<String, Object>) state
-                    .value(GraphStateKeys.OUTBOUND_CAPTURE).orElse(null);
-            if (outbound != null) {
-                outbound.put("matchedFeature", resolvedFeature);
-            }
         }
 
         log.info("[{}] ticket answer ({} chars, history={}, mode={})",
@@ -207,7 +198,7 @@ public class TicketAgentNode extends AbstractGraphNode {
         for (int i = history.size() - 1; i >= 0; i--) {
             ChatMessage m = history.get(i);
             String fn = m.getFeatureName();
-            if (fn != null && !fn.isBlank() && !"chitchat".equals(fn)) {
+            if (fn != null && !fn.isBlank() && !"chitchat".equals(fn) && !"Chit".equals(fn)) {
                 log.info("[{}] feature 从 history 回溯命中: {}", NODE_ID, fn);
                 return fn;
             }

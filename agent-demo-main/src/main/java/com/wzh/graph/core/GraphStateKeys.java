@@ -99,24 +99,6 @@ public final class GraphStateKeys {
      */
     public static final String PHASE_LOG = "phaseLog";
 
-    // ==================== 出站捕获 (第六刀 Batch 2 hotfix v4) ====================
-
-    /**
-     * 出站捕获 holder (Map&lt;String, Object&gt;).
-     *
-     * <p>Controller 在 stream 启动前创建一个 ConcurrentHashMap, 通过 initial state 透传给所有节点.
-     * 关键节点 (IntentNode / FeatureResolveNode / TicketAgentNode) 在 doApply 中
-     * 把需要回传给 Controller 的字段 (intent, matchedFeature) 直接 put 进这个 holder.
-     * Controller 在 doOnComplete 时直接从 holder 读取, 不再依赖 NodeOutput.state() 行为.</p>
-     *
-     * <p>holder map 推荐 key:
-     * <ul>
-     *   <li>{@code "intent"} → {@link com.wzh.enums.Intent}</li>
-     *   <li>{@code "matchedFeature"} → String</li>
-     * </ul></p>
-     */
-    public static final String OUTBOUND_CAPTURE = "outboundCapture";
-
     private GraphStateKeys() {
         // 禁止实例化
     }

@@ -99,12 +99,10 @@ public class MainGraphSseController {
         @SuppressWarnings("unchecked")
         List<SourceInfo>[] capturedSources = new List[]{Collections.emptyList()};
 
-        // 第六刀 Batch 2 hotfix v4: outboundCapture holder.
-        // 不再依赖 Spring AI Alibaba Graph 的 NodeOutput.state() 拿中间字段
-        // (v3 尝试用 NodeOutput 但类型兼容性有问题; doOnNext 中间节点 state 行为又不可靠).
-        // 改为通过 initial state 注入一个线程安全的 holder Map, 让 IntentNode / FeatureResolveNode /
-        // TicketAgentNode 在 doApply 里主动把关键字段写进去, Controller 在 doOnComplete 时直接读.
-        // 这是最稳的方案: 不依赖框架取值行为, 节点显式协议化输出.
+        // 第六刀 Batch 2 hotfix v5: outboundCapture 作为 doOnNext 内部的"已捕获"标记 + 字段缓存,
+        // 完全由 Controller 闭包持有, 不再通过 state 透传给节点 (实测框架对 state 值做了拷贝, 节点写入无效).
+        // 由 doOnNext 在各节点完成时, 从 no.state() 读取 INTENT / MATCHED_FEATURE 的 ArrayList 包装值,
+        // 反序列化后存入此 holder. doOnComplete 时直接读取.
         java.util.concurrent.ConcurrentHashMap<String, Object> outboundCapture =
                 new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -136,8 +134,7 @@ public class MainGraphSseController {
         // 避免 CompiledGraph 单例跨调用复用 OverAllState 导致 phaseLog 累加.
         initial.put(GraphStateKeys.PHASE_LOG, new ArrayList<String>());
         initial.put(GraphStateKeys.PHASE_LATENCIES, new HashMap<String, Long>());
-        // 第六刀 Batch 2 hotfix v4: holder 透传给所有节点
-        initial.put(GraphStateKeys.OUTBOUND_CAPTURE, outboundCapture);
+        // v5 起 OUTBOUND_CAPTURE 不再通过 state 透传, Controller 在 doOnNext 闭包里直接持有.
 
         // 7. 异步执行 Graph stream
         new Thread(() -> {
@@ -145,11 +142,48 @@ public class MainGraphSseController {
             try {
                 mainGraph.stream(initial)
                         .doOnNext(no -> {
-                            // 临时 DEBUG: 看每次 doOnNext 时节点 + outboundCapture 内容
-                            log.info("[DEBUG doOnNext] node='{}' holder={}",
-                                    no.node(), outboundCapture);
+                            // ====== 诊断 DEBUG (Batch 2 hotfix v6) ======
+                            Object stateIntentRaw = null;
+                            Object stateFeatureRaw = null;
+                            try {
+                                stateIntentRaw = no.state().value(GraphStateKeys.INTENT).orElse(null);
+                                stateFeatureRaw = no.state().value(GraphStateKeys.MATCHED_FEATURE).orElse(null);
+                            } catch (Exception e) {
+                                log.warn("[DEBUG doOnNext] read state failed", e);
+                            }
+                            log.info("[DEBUG doOnNext] node='{}' state.INTENT={} state.MATCHED_FEATURE={} closureHolder={}",
+                                    no.node(), stateIntentRaw, stateFeatureRaw, outboundCapture);
 
-                            // intent 完成 → 若 chitchat 立即推空 meta (从 holder 读 intent)
+                            // ====== v6 关键修复: 在指定节点完成时强制覆盖, 不用 "首次捕获不变" 策略 ======
+                            // 原因: CompiledGraph 是 @Bean 单例, 跨请求复用 OverAllState. 早期节点
+                            // (__START__/preprocess) 的 doOnNext 会读到上一次请求残留的 INTENT/MATCHED_FEATURE,
+                            // 若用 "首次捕获不变" 策略, 残留值就把本次真值挤掉了 (复现现象: 闲聊命中"快速涂色",
+                            // 主链路问题命中 "Chit"). 改为只在写入该字段的节点完成时强制覆盖 holder.
+                            // Batch 1 已修了 PHASE_LOG/PHASE_LATENCIES, 此处补齐 INTENT/MATCHED_FEATURE.
+                            if ("intent".equals(no.node()) && stateIntentRaw != null) {
+                                Intent decoded = decodeIntent(stateIntentRaw);
+                                if (decoded != null) {
+                                    outboundCapture.put("intent", decoded);
+                                    log.info("[DEBUG] captured INTENT={} at node='intent'", decoded);
+                                }
+                            }
+                            if ("feature_resolve".equals(no.node()) && stateFeatureRaw != null) {
+                                String decoded = decodeString(stateFeatureRaw);
+                                if (decoded != null && !decoded.isBlank()) {
+                                    outboundCapture.put("matchedFeature", decoded);
+                                    log.info("[DEBUG] captured MATCHED_FEATURE={} at node='feature_resolve'", decoded);
+                                }
+                            }
+                            // ticket_agent 完成 → history 回溯命中的 feature 也作为兜底覆盖
+                            if ("ticket_agent".equals(no.node()) && stateFeatureRaw != null) {
+                                String decoded = decodeString(stateFeatureRaw);
+                                if (decoded != null && !decoded.isBlank()) {
+                                    outboundCapture.put("matchedFeature", decoded);
+                                    log.info("[DEBUG] captured MATCHED_FEATURE={} at node='ticket_agent' (fallback)", decoded);
+                                }
+                            }
+
+                            // intent 完成 → 若 chitchat 立即推空 meta
                             if ("intent".equals(no.node()) && !metaEmitted.get()) {
                                 Intent intent = (Intent) outboundCapture.get("intent");
                                 if (intent != null && intent.isShortCircuit()) {
@@ -223,6 +257,48 @@ public class MainGraphSseController {
 
     // ==================== meta / done / error 发送 ====================
 
+    /**
+     * 反序列化从 Spring AI Alibaba Graph state 取出的 Intent.
+     *
+     * <p>背景: 框架内部把节点 put 进 partial 的对象做了序列化处理. 取回时:
+     * <ul>
+     *   <li>枚举 → ArrayList&lt;Object&gt;: {@code [classNameOrString, code]}
+     *       例如 Intent.CHITCHAT → {@code [com.wzh.enums.Intent, "chitchat"]}</li>
+     *   <li>String → 仍然是 String (无影响)</li>
+     *   <li>原对象 → 可能也是原对象 (在某些版本/路径下)</li>
+     * </ul>
+     * 此方法对三种情况都做兼容.</p>
+     */
+    private Intent decodeIntent(Object raw) {
+        if (raw == null) return null;
+        if (raw instanceof Intent) return (Intent) raw;
+        if (raw instanceof List<?> list && !list.isEmpty()) {
+            // 优先按 [_, code] 的 code 位置解析; 失败再尝试 [code] 单元素
+            Object codeCandidate = list.size() > 1 ? list.get(1) : list.get(0);
+            if (codeCandidate instanceof String code) {
+                return Intent.fromCodeOrDefault(code);
+            }
+        }
+        if (raw instanceof String code) {
+            return Intent.fromCodeOrDefault(code);
+        }
+        log.warn("[decodeIntent] 无法解析 raw 类型={} 值={}", raw.getClass(), raw);
+        return null;
+    }
+
+    /**
+     * 反序列化从 state 取出的 String. 兼容 String 直存 和 [_, value] ArrayList 包装两种情况.
+     */
+    private String decodeString(Object raw) {
+        if (raw == null) return null;
+        if (raw instanceof String s) return s;
+        if (raw instanceof List<?> list && !list.isEmpty()) {
+            Object candidate = list.size() > 1 ? list.get(1) : list.get(0);
+            if (candidate instanceof String s) return s;
+        }
+        return raw.toString();
+    }
+
     private void emitMeta(SseEmitter emitter, Long sessionId,
                           List<String> relatedImages, List<SourceInfo> sources) {
         try {
@@ -291,6 +367,12 @@ public class MainGraphSseController {
         }
     }
 
+    /**
+     * 计算本轮消息的 feature_name 标签。
+     * - 闲聊意图 → "chitchat"
+     * - matchedFeature 有值且非空白 → matchedFeature 本身
+     * - 其他(主链路但未匹配到 feature)→ null
+     */
     /**
      * 计算本轮消息的 feature_name 标签。
      * - 闲聊意图 → "chitchat"

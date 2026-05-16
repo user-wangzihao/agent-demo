@@ -116,9 +116,6 @@ public class MainGraphConfig {
             // 配合 Controller 入口显式 put 空集合, 双保险.
             s.put(GraphStateKeys.PHASE_LATENCIES, new ReplaceStrategy());
             s.put(GraphStateKeys.PHASE_LOG, new ReplaceStrategy());
-            // 第六刀 Batch 2 hotfix v4: holder 用 ReplaceStrategy
-            // (节点只是往 map 里 put, 不会替换 holder 引用本身)
-            s.put(GraphStateKeys.OUTBOUND_CAPTURE, new ReplaceStrategy());
             return s;
         };
     }

@@ -53,14 +53,10 @@ public class IntentNode extends AbstractGraphNode {
         partial.put(GraphStateKeys.INTENT_SOURCE, result.getSource());
         partial.put(GraphStateKeys.INTENT_CONFIDENCE, result.getConfidence());
 
-        // 第六刀 Batch 2 hotfix v4: 把 intent 主动写进 outboundCapture holder,
-        // 让 Controller 在 doOnComplete 时能直接读取 (绕开 NodeOutput.state() 行为不可靠的问题).
-        @SuppressWarnings("unchecked")
-        Map<String, Object> outbound = (Map<String, Object>) state
-                .value(GraphStateKeys.OUTBOUND_CAPTURE).orElse(null);
-        if (outbound != null) {
-            outbound.put("intent", intent);
-        }
+        // 第六刀 Batch 2 hotfix v5: 节点端写 holder 的方案已废弃.
+        // 实测 Spring AI Alibaba Graph 1.1.2 对 state 里的可变对象做了拷贝,
+        // 节点拿到的 holder 是副本, put 进去对 Controller 持有的原 holder 无影响.
+        // Controller 改用 doOnNext 直接抢救式读取 + 反序列化 ArrayList 包装的 Intent.
 
         log.info("[{}] query='{}' intent={} source={} conf={}",
                 NODE_ID, userMessage, intent.getCode(), result.getSource(), result.getConfidence());
