@@ -1,6 +1,6 @@
 package com.wzh.controller;
 
-import com.wzh.service.AgentService;
+import com.wzh.service.FeatureDocumentLearnService;
 import com.wzh.service.VideoLearnService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,7 +21,7 @@ import java.util.concurrent.CompletableFuture;
 @RequiredArgsConstructor
 public class InternalLearningController {
 
-    private final AgentService agentService;
+    private final FeatureDocumentLearnService featureDocumentLearnService;
     private final VideoLearnService videoLearnService;
 
     @Value("${internal.api-key:internal-secret-key-change-me}")
@@ -39,7 +39,7 @@ public class InternalLearningController {
         CompletableFuture.runAsync(() -> {
             try {
                 log.info("[内部接口-异步] 开始学习文档 id={}", docId);
-                agentService.learnDocument(docId);
+                featureDocumentLearnService.learnDocument(docId);
                 log.info("[内部接口-异步] 文档学习完成 id={}", docId);
             } catch (Exception e) {
                 log.error("[内部接口-异步] 文档学习失败 id={}", docId, e);

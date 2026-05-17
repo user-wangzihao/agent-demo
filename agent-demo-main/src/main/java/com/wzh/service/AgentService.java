@@ -18,12 +18,12 @@ import com.wzh.entity.FaqDocument;
 import com.wzh.entity.dto.FaqDocumentDTO;
 import com.wzh.entity.dto.FeatureDocumentDTO;
 import com.wzh.enums.Intent;
+import com.wzh.graph.support.SourceInfo;
 import com.wzh.model.intent.IntentClassificationResult;
 import com.wzh.service.MilvusService.ChunkData;
 import com.wzh.service.MilvusService.SearchResult;
 import com.wzh.service.intent.IntentBoostUtil;
 import com.wzh.service.intent.IntentClassifier;
-import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -83,8 +83,16 @@ public class AgentService {
         this.intentClassifier = intentClassifier;
     }
 
-    // ==================== 文档学习 ====================
+    // ==================== 文档学习 (Deprecated) ====================
 
+    /**
+     * @deprecated 第六刀 Batch 4-1: 已迁移至 {@link FeatureDocumentLearnService#learnDocument(Long)}.
+     * 所有调用方 (AgentController / InternalLearningController / KnowledgeToolService)
+     * 均已改注入新服务. 此方法及其 6 个私有依赖 (extractSectionSummaries / extractKeyPoints /
+     * buildCrossReference / buildKnowledgeChunks / getKnowledgeTypeLabel / buildChunk /
+     * buildImageChunks) 全部进 Batch 5 删除清单, 与 AgentService 整体一并送走.
+     */
+    @Deprecated
     public void learnDocument(Long docId) {
         FeatureDocumentDTO doc = featureDocumentService.getDocumentById(docId);
         String featureName = doc.getFeatureName();
@@ -139,8 +147,14 @@ public class AgentService {
         log.info("文档 [{}] 学习完成，共生成 {} 个知识块", featureName, chunks.size());
     }
 
-    // ==================== FAQ 学习 ====================
+    // ==================== FAQ 学习 (Deprecated, 死代码) ====================
 
+    /**
+     * @deprecated 第四刀引入 {@link FaqVectorizeService#learnFaq(Long)} 后已无调用方.
+     * FAQ 现在走独立的 {@code faq_vectors} collection (不再用负 docId 混在
+     * {@code feature_document_vectors} 里). 进 Batch 5 删除清单.
+     */
+    @Deprecated
     public void learnFaq(Long faqId) {
         FaqDocumentDTO faq = faqDocumentService.getFaqById(faqId);
         milvusService.deleteByDocId(-faqId);
@@ -547,8 +561,14 @@ public class AgentService {
         }
     }
 
-    // ==================== 反馈 ====================
+    // ==================== 反馈 (Deprecated) ====================
 
+    /**
+     * @deprecated 第六刀 Batch 4-3: 已迁移至 {@link FeedbackService#submitFeedback(Long, Integer, String)}.
+     * 唯一调用方 {@code AgentController.submitFeedback} 已改注入新服务.
+     * 进 Batch 5 删除清单, 与 AgentService 整体一并送走.
+     */
+    @Deprecated
     public void submitFeedback(Long messageId, Integer rating, String reason) {
         ChatMessage message = chatMessageMapper.selectById(messageId);
         if (message == null) throw new RuntimeException("消息不存在");
@@ -558,8 +578,14 @@ public class AgentService {
         chatMessageMapper.updateById(message);
     }
 
-    // ==================== 导出 ====================
+    // ==================== 导出 (Deprecated) ====================
 
+    /**
+     * @deprecated 第六刀 Batch 4-2: 已迁移至 {@link SessionExportService#exportSessionAsMarkdown(Long)}.
+     * 唯一调用方 {@code AgentController.exportSession} 已改注入新服务.
+     * 进 Batch 5 删除清单, 与 AgentService 整体一并送走.
+     */
+    @Deprecated
     public String exportSessionAsMarkdown(Long sessionId) {
         ChatSession session = chatSessionMapper.selectById(sessionId);
         if (session == null) throw new RuntimeException("会话不存在");
@@ -1048,12 +1074,5 @@ public class AgentService {
                 if (!t.isEmpty() && !target.contains(t)) target.add(t);
             }
         }
-    }
-
-    @Data
-    public static class SourceInfo {
-        public String featureName;
-        public String chunkType;
-        public float score;
     }
 }

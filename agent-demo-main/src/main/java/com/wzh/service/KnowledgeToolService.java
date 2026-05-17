@@ -37,7 +37,7 @@ public class KnowledgeToolService {
     private final ChatMessageMapper chatMessageMapper;
     private final ChatSessionMapper chatSessionMapper;
     private final SysUserMapper sysUserMapper;
-    private final AgentService agentService;
+    private final FeatureDocumentLearnService featureDocumentLearnService;
     private final VideoLearnService videoLearnService;
     private final ObjectMapper objectMapper;
 
@@ -183,7 +183,7 @@ public class KnowledgeToolService {
             for (FeatureDocument doc : unlearnedDocs) {
                 try {
                     log.info("[异步学习] 开始学习文档: {} (id={})", doc.getFeatureName(), doc.getId());
-                    agentService.learnDocument(doc.getId());
+                    featureDocumentLearnService.learnDocument(doc.getId());
                     log.info("[异步学习] 文档学习完成: {}", doc.getFeatureName());
                 } catch (Exception e) {
                     log.error("[异步学习] 文档学习失败: {} - {}", doc.getFeatureName(), e.getMessage());
@@ -218,7 +218,7 @@ public class KnowledgeToolService {
         CompletableFuture.runAsync(() -> {
             try {
                 log.info("[异步学习] 开始学习文档: {} (id={})", featureName, docId);
-                agentService.learnDocument(docId);
+                featureDocumentLearnService.learnDocument(docId);
 
                 List<VideoDocument> relatedVideos = videoDocumentMapper.selectList(
                         new LambdaQueryWrapper<VideoDocument>()

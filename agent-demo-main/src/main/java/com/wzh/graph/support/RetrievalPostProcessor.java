@@ -2,7 +2,6 @@ package com.wzh.graph.support;
 
 import cn.hutool.core.util.StrUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.wzh.service.AgentService;
 import com.wzh.service.MilvusService;
 import com.wzh.service.MilvusService.SearchResult;
 
@@ -124,15 +123,16 @@ public final class RetrievalPostProcessor {
     }
 
     /**
-     * 把 SearchResult 列表转成 AgentService.SourceInfo 列表 (过滤掉 image_description 类型).
+     * 把 SearchResult 列表转成 SourceInfo 列表 (过滤掉 image_description 类型).
      *
-     * <p><b>注意</b>: 复用 AgentService.SourceInfo 这个内部类, 保持前端协议一致.</p>
+     * <p><b>注意</b>: SourceInfo 是前端"来源"列表的展示载体, 字段语义见
+     * {@link SourceInfo} 类注释.</p>
      */
-    public static List<AgentService.SourceInfo> toSourceInfoList(List<SearchResult> results) {
+    public static List<SourceInfo> toSourceInfoList(List<SearchResult> results) {
         return results.stream()
                 .filter(sr -> !"image_description".equals(sr.chunkType))
                 .map(sr -> {
-                    AgentService.SourceInfo s = new AgentService.SourceInfo();
+                    SourceInfo s = new SourceInfo();
                     s.featureName = sr.featureName;
                     s.chunkType = sr.chunkType;
                     s.score = sr.score;
@@ -154,16 +154,16 @@ public final class RetrievalPostProcessor {
      *   <li>chunkType="FAQ": 让前端识别这是 FAQ 来源, 据此选择展示形式</li>
      *   <li>score: 检索相关度 (注意 Doc 和 FAQ 走不同 collection, 分数不可跨类型比较)</li>
      * </ul>
-     * 这个约定是临时的: 第六刀 SourceInfo 迁出 AgentService 时, 可以重构成
-     * 多态 / sealed interface / DTO 拆分等更优雅的形式. 当前阶段先复用字段.</p>
+     * 这是当前阶段的简单方案. 后续若要支持更丰富的来源元信息 (如 FAQ 的
+     * faqId / 原始 question / answer), 可演进为 sealed interface + 多态子类.</p>
      */
-    public static List<AgentService.SourceInfo> toFaqSourceInfoList(
+    public static List<SourceInfo> toFaqSourceInfoList(
             List<MilvusService.SearchResult> faqResults) {
         if (faqResults == null || faqResults.isEmpty()) return new ArrayList<>();
-        List<AgentService.SourceInfo> sources = new ArrayList<>();
+        List<SourceInfo> sources = new ArrayList<>();
         for (MilvusService.SearchResult sr : faqResults) {
             if ("image_description".equals(sr.chunkType)) continue;
-            AgentService.SourceInfo si = new AgentService.SourceInfo();
+            SourceInfo si = new SourceInfo();
             si.featureName = extractQuestionFromFaqContent(sr.content);   // ← 装问题摘要
             si.chunkType = "FAQ";
             si.score = sr.score;

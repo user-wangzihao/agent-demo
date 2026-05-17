@@ -5,6 +5,9 @@ import com.wzh.agentdemo.common.entity.VideoDocument;
 import com.wzh.entity.dto.ChatRequest;
 import com.wzh.entity.dto.FeedbackRequest;
 import com.wzh.service.AgentService;
+import com.wzh.service.FeatureDocumentLearnService;
+import com.wzh.service.FeedbackService;
+import com.wzh.service.SessionExportService;
 import com.wzh.service.VideoDocumentService;
 import com.wzh.service.VideoLearnService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -26,13 +29,16 @@ import java.util.List;
 public class AgentController {
 
     private final AgentService agentService;
+    private final FeatureDocumentLearnService featureDocumentLearnService;
+    private final FeedbackService feedbackService;
+    private final SessionExportService sessionExportService;
     private final VideoLearnService videoLearnService;
     private final VideoDocumentService videoDocumentService;
 
     @Operation(summary = "学习功能文档")
     @PostMapping("/learn/{docId}")
     public Result<String> learnDocument(@PathVariable Long docId) {
-        agentService.learnDocument(docId);
+        featureDocumentLearnService.learnDocument(docId);
         return Result.success("文档学习完成");
     }
 
@@ -55,14 +61,14 @@ public class AgentController {
     @Operation(summary = "提交反馈（点赞/点踩）")
     @PostMapping("/feedback")
     public Result<String> submitFeedback(@RequestBody FeedbackRequest request) {
-        agentService.submitFeedback(request.getMessageId(), request.getRating(), request.getReason());
+        feedbackService.submitFeedback(request.getMessageId(), request.getRating(), request.getReason());
         return Result.success("反馈已提交");
     }
 
     @Operation(summary = "导出会话为 Markdown")
     @GetMapping("/export/{sessionId}")
     public ResponseEntity<byte[]> exportSession(@PathVariable Long sessionId) {
-        String markdown = agentService.exportSessionAsMarkdown(sessionId);
+        String markdown = sessionExportService.exportSessionAsMarkdown(sessionId);
         byte[] bytes = markdown.getBytes(StandardCharsets.UTF_8);
 
         return ResponseEntity.ok()

@@ -78,7 +78,7 @@ public final class GraphStateKeys {
     public static final String RETRIEVED_FAQ_CHUNKS = "retrievedFaqChunks";
     /** 合并去重后的相关图片 URL (List<String>) */
     public static final String RELATED_IMAGES = "relatedImages";
-    /** 来源元信息 (List<AgentService.SourceInfo>) */
+    /** 来源元信息 (List&lt;com.wzh.graph.support.SourceInfo&gt;) */
     public static final String SOURCES = "sources";
 
     // ==================== 生成结果 (KnowledgeAnswerNode) ====================

@@ -4,7 +4,7 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.RetrievalPostProcessor;
-import com.wzh.service.AgentService;
+import com.wzh.graph.support.SourceInfo;
 import com.wzh.service.MilvusService.SearchResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -81,9 +81,9 @@ public class MergerNode extends AbstractGraphNode {
 
         // ============ 分别构造 sources, 然后合并 ============
         // chunkType="FAQ" 让前端能区分; 文档侧保留原 chunkType (text_main / image_description 等)
-        List<AgentService.SourceInfo> docSources = RetrievalPostProcessor.toSourceInfoList(processedDoc);
-        List<AgentService.SourceInfo> faqSources = RetrievalPostProcessor.toFaqSourceInfoList(processedFaq);
-        List<AgentService.SourceInfo> sources = new ArrayList<>();
+        List<SourceInfo> docSources = RetrievalPostProcessor.toSourceInfoList(processedDoc);
+        List<SourceInfo> faqSources = RetrievalPostProcessor.toFaqSourceInfoList(processedFaq);
+        List<SourceInfo> sources = new ArrayList<>();
         sources.addAll(faqSources);   // FAQ 在前, 与 Context 拼接顺序对齐
         sources.addAll(docSources);
 
