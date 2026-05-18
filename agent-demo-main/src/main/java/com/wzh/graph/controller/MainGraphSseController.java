@@ -83,10 +83,29 @@ public class MainGraphSseController {
         List<String> userImageUrls = (List<String>) body.get("imageUrls");
         String selectedFeatureName = body.get("selectedFeatureName") == null ? null
                 : String.valueOf(body.get("selectedFeatureName"));
+        // 第六刀 Batch 4-4: regenerate 场景标记. 非空 = 用户点了"重新生成"按钮.
+        // 此时 user 消息已在 DB 里, 旧 assistant 消息要删, message/imageUrls 反查得到.
+        Long regenerateFromMessageId = body.get("regenerateFromMessageId") == null ? null
+                : toLong(body.get("regenerateFromMessageId"));
 
         // 2. session 处理
-        Long sessionId = ensureSession(incomingSessionId, userId);
-        Long currentUserMessageId = saveUserMessage(sessionId, userMessage, userImageUrls);
+        Long sessionId;
+        Long currentUserMessageId;
+        if (regenerateFromMessageId != null) {
+            // ===== regenerate 分支: 反查 user 消息 + 删旧 assistant + 不插入新 user 消息 =====
+            RegenerateContext rc = resolveRegenerateContext(regenerateFromMessageId);
+            sessionId = rc.sessionId;
+            currentUserMessageId = rc.userMessageId;
+            userMessage = rc.userContent;
+            userImageUrls = rc.userImageUrls;
+            log.info("[regenerate] fromAssistantId={} → sessionId={} userMsgId={} content.len={}",
+                    regenerateFromMessageId, sessionId, currentUserMessageId,
+                    userMessage == null ? 0 : userMessage.length());
+        } else {
+            // ===== 普通分支: 原逻辑 =====
+            sessionId = ensureSession(incomingSessionId, userId);
+            currentUserMessageId = saveUserMessage(sessionId, userMessage, userImageUrls);
+        }
 
         // 3. 加载 history (排除当前用户消息)
         List<ChatMessage> history = loadHistoryExcludingCurrent(sessionId);
@@ -330,16 +349,21 @@ public class MainGraphSseController {
             // - 否则 → null
             String featureName = resolveFeatureNameForMessage(intent, matchedFeature);
 
-            // 回填当前 user 消息的 feature_name
-            // 防御: featureName 为 null 时跳过 update — 否则 MyBatis-Plus 在 entity 全 null 时
-            // 会生成 `UPDATE chat_message    WHERE id=?` 这种无 SET 子句的非法 SQL.
-            // null 意味着"没匹配到任何 feature 且不是 chitchat", user 消息插入时 feature_name 默认就是 null,
-            // 不发起 update 即正确语义.
-            if (currentUserMessageId != null && featureName != null) {
-                ChatMessage userUpdate = new ChatMessage();
-                userUpdate.setId(currentUserMessageId);
-                userUpdate.setFeatureName(featureName);
-                chatMessageMapper.updateById(userUpdate);
+            // 回填当前 user 消息的 feature_name.
+            //
+            // 第六刀 Batch 4-4: 改用 LambdaUpdateWrapper.set 显式覆盖, 支持 null 写回.
+            //
+            // 之前的实现 (chatMessageMapper.updateById(entity)) 利用 MyBatis-Plus 的"忽略 null"
+            // 默认策略 -- featureName 为 null 时跳过 update, 避免空 SET 子句非法 SQL.
+            // 但这导致 regenerate 场景下: 老 user 消息 feature_name='A', 重新生成时若新结果
+            // feature_name=null, 字段保留为 'A' 不会被覆盖, 破坏"feature_name 跟最新一次回答对齐"语义.
+            //
+            // 改为显式 set 后, null 会真实写回 DB, 行为对所有场景一致 (首轮 / 后续轮 / regenerate).
+            if (currentUserMessageId != null) {
+                chatMessageMapper.update(null,
+                        new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<ChatMessage>()
+                                .eq(ChatMessage::getId, currentUserMessageId)
+                                .set(ChatMessage::getFeatureName, featureName));
             }
 
             // 落库 assistant 消息(带 feature_name)
@@ -353,13 +377,20 @@ public class MainGraphSseController {
             msg.setSources(objectMapper.writeValueAsString(
                     sources == null ? Collections.emptyList() : sources));
             chatMessageMapper.insert(msg);
+            // MyBatis-Plus 默认自增主键回填: msg.getId() 现在已是 DB 主键
 
             // 首轮对话自动生成标题 (history 为空时是首轮)
             if (historySize == 0) {
                 autoUpdateSessionTitle(sessionId);
             }
 
-            emitter.send(SseEmitter.event().name("done").data(""));
+            // done 事件返回 assistantMessageId, 让前端知道这条新 assistant 消息的 DB 主键.
+            // 前端据此把 id 挂到本地 message 对象上, 后续点赞/点踩/重新生成才能定位到具体消息.
+            // 此前 done.data 为空串, 导致刚生成的消息无法立即接收反馈 (只有刷新页面后才行).
+            String doneJson = objectMapper.writeValueAsString(Map.of(
+                    "assistantMessageId", msg.getId()
+            ));
+            emitter.send(SseEmitter.event().name("done").data(doneJson));
             emitter.complete();
         } catch (Exception e) {
             log.error("完成处理失败", e);
@@ -456,6 +487,73 @@ public class MainGraphSseController {
         } catch (Exception e) {
             log.warn("自动更新会话标题失败 sessionId={}", sessionId, e);
         }
+    }
+
+    // ==================== 重新生成 helper (第六刀 Batch 4-4) ====================
+
+    /**
+     * regenerate 入口预处理: 反查上一条 user 消息 + 物理删除旧 assistant 消息.
+     *
+     * <p><b>语义</b>: 用户点了"重新生成"按钮, 期望对同一个问题重新跑 Graph 拿一个新答案.
+     * 老 assistant 消息已经是"过期回答", 物理删掉; user 消息保持不变 (它仍在 DB 里).
+     * Graph 跑完后, handleDone 会插入新 assistant 消息 (handleDone 路径无差异, 复用普通流程).</p>
+     *
+     * <p><b>失败回滚策略</b>: 不做事务. 如果 Graph 失败, 老 assistant 已被删 = 用户在该轮看到
+     * "重试一次"的空白态. 用户重新发问即可, 不构成数据完整性问题. 加事务对回退价值低于复杂度.</p>
+     *
+     * <p><b>幂等</b>: 第二次对同一个已删消息发 regenerate 会抛"消息不存在" — 防误触.</p>
+     *
+     * @throws RuntimeException 消息不存在 / 非 assistant 消息 / 找不到对应 user 消息
+     */
+    private RegenerateContext resolveRegenerateContext(Long assistantMessageId) {
+        ChatMessage assistantMsg = chatMessageMapper.selectById(assistantMessageId);
+        if (assistantMsg == null || !"assistant".equals(assistantMsg.getRole())) {
+            throw new RuntimeException("消息不存在或非 AI 回答");
+        }
+        Long sessionId = assistantMsg.getSessionId();
+
+        // 找该 assistant 消息之前最近一条 user 消息 (id < assistantMessageId 是稳妥的偏序约束:
+        // 同 session 内 id 严格递增, 比按 create_time 排序更鲁棒 — 后者偶有同毫秒并列).
+        List<ChatMessage> previous = chatMessageMapper.selectList(
+                new LambdaQueryWrapper<ChatMessage>()
+                        .eq(ChatMessage::getSessionId, sessionId)
+                        .eq(ChatMessage::getRole, "user")
+                        .lt(ChatMessage::getId, assistantMessageId)
+                        .orderByDesc(ChatMessage::getId)
+                        .last("LIMIT 1"));
+        if (previous.isEmpty()) throw new RuntimeException("找不到对应的用户消息");
+        ChatMessage userMsg = previous.get(0);
+
+        // 反序列化 user_images JSON, 兼容历史脏数据 (非法 JSON 静默降级为空列表)
+        List<String> imageUrls = null;
+        if (userMsg.getUserImages() != null && !userMsg.getUserImages().isBlank()) {
+            try {
+                imageUrls = objectMapper.readValue(userMsg.getUserImages(),
+                        objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
+            } catch (Exception ignored) {
+                // ignore
+            }
+        }
+
+        // 物理删除老 assistant 消息. 注意: chat_message 表无 deleted 字段 (无软删约定).
+        chatMessageMapper.deleteById(assistantMessageId);
+
+        RegenerateContext ctx = new RegenerateContext();
+        ctx.sessionId = sessionId;
+        ctx.userMessageId = userMsg.getId();
+        ctx.userContent = userMsg.getContent();
+        ctx.userImageUrls = imageUrls;
+        return ctx;
+    }
+
+    /**
+     * regenerate 预处理结果. 仅本类内部传值用.
+     */
+    private static class RegenerateContext {
+        Long sessionId;
+        Long userMessageId;
+        String userContent;
+        List<String> userImageUrls;
     }
 
     // ==================== 通用 ====================

@@ -10,7 +10,7 @@ spring:
   # ============ MyBatis-Plus 使用的 DataSource ============
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://36.150.236.251:3306/agent_demo?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://36.150.236.251:3337/agent_demo?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
     username: root
     password: 123456
     type: com.alibaba.druid.pool.DruidDataSource

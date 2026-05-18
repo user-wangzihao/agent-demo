@@ -350,8 +350,21 @@ public class AgentService {
         return emitter;
     }
 
-    // ==================== 重新生成 ====================
+    // ==================== 重新生成 (Deprecated) ====================
 
+    /**
+     * @deprecated 第六刀 Batch 4-4: 前端"重新生成"按钮已改调
+     * {@code POST /api/graph/chat-stream} 并携带 {@code regenerateFromMessageId} 字段,
+     * 主链路 Graph 统一处理 (见 {@link com.wzh.graph.controller.MainGraphSseController}).
+     *
+     * <p><b>下线意义</b>: 老 regenerate 走的是 AgentService 的同步 RAG 循环 — 没有 FAQ 检索、
+     * 没有 Admin/Ticket Agent 路由、没有 ChatClient 工具集硬隔离, 回答质量相比主链路严重退化.
+     * Batch 4-4 让 regenerate 和首轮发送走同一套 Graph, 输出质量完全对齐.</p>
+     *
+     * <p>本方法 + 私有方法 {@code chatStreamInternal} / {@code streamChitchatResponse} 等
+     * 老 RAG 链路一起进 Batch 5 删除清单, 与 AgentService 整体送走.</p>
+     */
+    @Deprecated
     public SseEmitter regenerateMessage(Long messageId) {
         ChatMessage assistantMsg = chatMessageMapper.selectById(messageId);
         if (assistantMsg == null || !"assistant".equals(assistantMsg.getRole())) {

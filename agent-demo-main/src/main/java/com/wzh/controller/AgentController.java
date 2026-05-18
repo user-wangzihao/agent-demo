@@ -52,12 +52,6 @@ public class AgentController {
                 request.getSelectedFeatureName());
     }
 
-    @Operation(summary = "重新生成回答")
-    @PostMapping(value = "/chat/regenerate/{messageId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter regenerateMessage(@PathVariable Long messageId) {
-        return agentService.regenerateMessage(messageId);
-    }
-
     @Operation(summary = "提交反馈（点赞/点踩）")
     @PostMapping("/feedback")
     public Result<String> submitFeedback(@RequestBody FeedbackRequest request) {
