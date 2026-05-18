@@ -44,9 +44,6 @@ import java.util.Set;
  *
  * <p><b>retrievalSource 的归属</b>: 该工具用于追问"刚才的回答来自哪", 用户和管理员都可能问,
  * 故同时挂在 knowledge 和 admin 两个 client 上.</p>
- *
- * <p><b>mcpChatClient (老 bean) 暂留</b>: AgentService 还在引用, 第六刀 Batch 4 删 AgentService
- * 时一并删除. 老 bean 仍持有全部工具, 行为不变.</p>
  */
 @Slf4j
 @Configuration
@@ -124,18 +121,6 @@ public class ChatClientConfig {
                 tools.length, allowed);
         return ChatClient.builder(chatModel)
                 .defaultToolCallbacks(tools)
-                .build();
-    }
-
-    /**
-     * 老 bean, AgentService 还在引用, 第六刀 Batch 4 一起删除.
-     * 持有全部工具, 行为兼容旧链路.
-     */
-    @Bean
-    public ChatClient mcpChatClient(ChatModel chatModel, ToolCallbackProvider toolCallbackProvider) {
-        log.info("[ChatClientConfig] 构建 mcpChatClient (老 bean, 全部工具, Batch 4 删除)");
-        return ChatClient.builder(chatModel)
-                .defaultToolCallbacks(toolCallbackProvider)
                 .build();
     }
 

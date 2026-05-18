@@ -162,6 +162,8 @@ public class MainGraphSseController {
                 mainGraph.stream(initial)
                         .doOnNext(no -> {
                             // ====== 诊断 DEBUG (Batch 2 hotfix v6) ======
+                            // 默认 debug 级别不打印; 如需排查 Graph 跨调用 state 残留 / 枚举序列化问题,
+                            // 把 application.yml 的 logging.level.com.wzh 改为 debug 即可看到.
                             Object stateIntentRaw = null;
                             Object stateFeatureRaw = null;
                             try {
@@ -170,7 +172,7 @@ public class MainGraphSseController {
                             } catch (Exception e) {
                                 log.warn("[DEBUG doOnNext] read state failed", e);
                             }
-                            log.info("[DEBUG doOnNext] node='{}' state.INTENT={} state.MATCHED_FEATURE={} closureHolder={}",
+                            log.debug("[DEBUG doOnNext] node='{}' state.INTENT={} state.MATCHED_FEATURE={} closureHolder={}",
                                     no.node(), stateIntentRaw, stateFeatureRaw, outboundCapture);
 
                             // ====== v6 关键修复: 在指定节点完成时强制覆盖, 不用 "首次捕获不变" 策略 ======
@@ -183,14 +185,14 @@ public class MainGraphSseController {
                                 Intent decoded = decodeIntent(stateIntentRaw);
                                 if (decoded != null) {
                                     outboundCapture.put("intent", decoded);
-                                    log.info("[DEBUG] captured INTENT={} at node='intent'", decoded);
+                                    log.debug("[DEBUG] captured INTENT={} at node='intent'", decoded);
                                 }
                             }
                             if ("feature_resolve".equals(no.node()) && stateFeatureRaw != null) {
                                 String decoded = decodeString(stateFeatureRaw);
                                 if (decoded != null && !decoded.isBlank()) {
                                     outboundCapture.put("matchedFeature", decoded);
-                                    log.info("[DEBUG] captured MATCHED_FEATURE={} at node='feature_resolve'", decoded);
+                                    log.debug("[DEBUG] captured MATCHED_FEATURE={} at node='feature_resolve'", decoded);
                                 }
                             }
                             // ticket_agent 完成 → history 回溯命中的 feature 也作为兜底覆盖
@@ -198,7 +200,7 @@ public class MainGraphSseController {
                                 String decoded = decodeString(stateFeatureRaw);
                                 if (decoded != null && !decoded.isBlank()) {
                                     outboundCapture.put("matchedFeature", decoded);
-                                    log.info("[DEBUG] captured MATCHED_FEATURE={} at node='ticket_agent' (fallback)", decoded);
+                                    log.debug("[DEBUG] captured MATCHED_FEATURE={} at node='ticket_agent' (fallback)", decoded);
                                 }
                             }
 
@@ -231,7 +233,7 @@ public class MainGraphSseController {
                             // v4: 直接从 outboundCapture holder 读, 不依赖 NodeOutput.state() 行为
                             Intent finalIntent = (Intent) outboundCapture.get("intent");
                             String finalFeature = (String) outboundCapture.get("matchedFeature");
-                            log.info("[DEBUG doOnComplete] finalIntent={} finalFeature='{}' holder={}",
+                            log.debug("[DEBUG doOnComplete] finalIntent={} finalFeature='{}' holder={}",
                                     finalIntent, finalFeature, outboundCapture);
 
                             handleDone(
@@ -340,7 +342,7 @@ public class MainGraphSseController {
                             String matchedFeature) {
         try {
             // 临时 DEBUG: 看 handleDone 收到的 intent / matchedFeature 真实值
-            log.info("[DEBUG handleDone] intent={} matchedFeature='{}' currentUserMessageId={}",
+            log.debug("[DEBUG handleDone] intent={} matchedFeature='{}' currentUserMessageId={}",
                     intent, matchedFeature, currentUserMessageId);
 
             // 第五刀 hotfix: 计算本轮的 feature_name

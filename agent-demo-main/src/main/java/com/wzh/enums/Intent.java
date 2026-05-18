@@ -37,7 +37,6 @@ import java.util.Optional;
  * @since 2026-05-08
  */
 @Getter
-@Slf4j
 public enum Intent {
 
     /** 操作指引: 用户想知道如何完成某个操作. 加权 operation_guide chunk. */
@@ -135,10 +134,6 @@ public enum Intent {
      * 是否为闲聊短路意图 (跳过 RAG 流程).
      */
     public boolean isShortCircuit() {
-        log.info("[INTENT] isShortCircuit={}", this == CHITCHAT);
-        log.info("[INTENT] isShortCircuit={}", this.code);
-        log.info("[INTENT] isShortCircuit={}", this.displayName);
-        log.info("[INTENT] isShortCircuit={}", this.boostChunkType);
         return this == CHITCHAT;
     }
 }
