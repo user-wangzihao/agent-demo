@@ -12,6 +12,7 @@ import com.wzh.common.UserContext;
 import com.wzh.enums.Intent;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.SourceInfo;
+import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.TokenSinkRegistry;
 import com.wzh.graph.support.TokenStreamSink;
 import com.wzh.utils.TokenUtil;
@@ -182,14 +183,14 @@ public class MainGraphSseController {
                             // 主链路问题命中 "Chit"). 改为只在写入该字段的节点完成时强制覆盖 holder.
                             // Batch 1 已修了 PHASE_LOG/PHASE_LATENCIES, 此处补齐 INTENT/MATCHED_FEATURE.
                             if ("intent".equals(no.node()) && stateIntentRaw != null) {
-                                Intent decoded = decodeIntent(stateIntentRaw);
+                                Intent decoded = RouteUtil.decodeIntent(stateIntentRaw);
                                 if (decoded != null) {
                                     outboundCapture.put("intent", decoded);
                                     log.debug("[DEBUG] captured INTENT={} at node='intent'", decoded);
                                 }
                             }
                             if ("feature_resolve".equals(no.node()) && stateFeatureRaw != null) {
-                                String decoded = decodeString(stateFeatureRaw);
+                                String decoded = RouteUtil.decodeString(stateFeatureRaw);
                                 if (decoded != null && !decoded.isBlank()) {
                                     outboundCapture.put("matchedFeature", decoded);
                                     log.debug("[DEBUG] captured MATCHED_FEATURE={} at node='feature_resolve'", decoded);
@@ -197,17 +198,22 @@ public class MainGraphSseController {
                             }
                             // ticket_agent 完成 → history 回溯命中的 feature 也作为兜底覆盖
                             if ("ticket_agent".equals(no.node()) && stateFeatureRaw != null) {
-                                String decoded = decodeString(stateFeatureRaw);
+                                String decoded = RouteUtil.decodeString(stateFeatureRaw);
                                 if (decoded != null && !decoded.isBlank()) {
                                     outboundCapture.put("matchedFeature", decoded);
                                     log.debug("[DEBUG] captured MATCHED_FEATURE={} at node='ticket_agent' (fallback)", decoded);
                                 }
                             }
 
-                            // intent 完成 → 若 chitchat 立即推空 meta
+                            // intent 完成 → 若 chitchat / admin_command 短路立即推空 meta
+                            // (这两类不经过 merger, 否则前端会等不到 meta)
                             if ("intent".equals(no.node()) && !metaEmitted.get()) {
                                 Intent intent = (Intent) outboundCapture.get("intent");
-                                if (intent != null && intent.isShortCircuit()) {
+                                String role = RouteUtil.safeString(no.state(),
+                                        GraphStateKeys.USER_ROLE, "user");
+                                if (intent != null
+                                        && (RouteUtil.isChitchat(intent)
+                                            || RouteUtil.isAdminCommand(intent, role))) {
                                     emitMeta(emitter, sessionId,
                                             Collections.emptyList(), Collections.emptyList());
                                     metaEmitted.set(true);
@@ -277,48 +283,6 @@ public class MainGraphSseController {
     }
 
     // ==================== meta / done / error 发送 ====================
-
-    /**
-     * 反序列化从 Spring AI Alibaba Graph state 取出的 Intent.
-     *
-     * <p>背景: 框架内部把节点 put 进 partial 的对象做了序列化处理. 取回时:
-     * <ul>
-     *   <li>枚举 → ArrayList&lt;Object&gt;: {@code [classNameOrString, code]}
-     *       例如 Intent.CHITCHAT → {@code [com.wzh.enums.Intent, "chitchat"]}</li>
-     *   <li>String → 仍然是 String (无影响)</li>
-     *   <li>原对象 → 可能也是原对象 (在某些版本/路径下)</li>
-     * </ul>
-     * 此方法对三种情况都做兼容.</p>
-     */
-    private Intent decodeIntent(Object raw) {
-        if (raw == null) return null;
-        if (raw instanceof Intent) return (Intent) raw;
-        if (raw instanceof List<?> list && !list.isEmpty()) {
-            // 优先按 [_, code] 的 code 位置解析; 失败再尝试 [code] 单元素
-            Object codeCandidate = list.size() > 1 ? list.get(1) : list.get(0);
-            if (codeCandidate instanceof String code) {
-                return Intent.fromCodeOrDefault(code);
-            }
-        }
-        if (raw instanceof String code) {
-            return Intent.fromCodeOrDefault(code);
-        }
-        log.warn("[decodeIntent] 无法解析 raw 类型={} 值={}", raw.getClass(), raw);
-        return null;
-    }
-
-    /**
-     * 反序列化从 state 取出的 String. 兼容 String 直存 和 [_, value] ArrayList 包装两种情况.
-     */
-    private String decodeString(Object raw) {
-        if (raw == null) return null;
-        if (raw instanceof String s) return s;
-        if (raw instanceof List<?> list && !list.isEmpty()) {
-            Object candidate = list.size() > 1 ? list.get(1) : list.get(0);
-            if (candidate instanceof String s) return s;
-        }
-        return raw.toString();
-    }
 
     private void emitMeta(SseEmitter emitter, Long sessionId,
                           List<String> relatedImages, List<SourceInfo> sources) {
@@ -401,20 +365,23 @@ public class MainGraphSseController {
     }
 
     /**
-     * 计算本轮消息的 feature_name 标签。
-     * - 闲聊意图 → "chitchat"
-     * - matchedFeature 有值且非空白 → matchedFeature 本身
-     * - 其他(主链路但未匹配到 feature)→ null
-     */
-    /**
-     * 计算本轮消息的 feature_name 标签。
-     * - 闲聊意图 → "chitchat"
-     * - matchedFeature 有值且非空白 → matchedFeature 本身
-     * - 其他(主链路但未匹配到 feature)→ null
+     * 计算本轮消息的 feature_name 标签 (落库到 chat_message.feature_name).
+     *
+     * <p>规则:
+     * <ul>
+     *   <li>闲聊意图 → "chitchat"</li>
+     *   <li>管理员指令意图 → "admin_command" (B5-b-1: 与 chitchat 对称, 短路链路不经过
+     *       FeatureResolveNode, 没有 matchedFeature 可用)</li>
+     *   <li>matchedFeature 有值且非空白 → matchedFeature 本身</li>
+     *   <li>其他 (主链路但未匹配到 feature) → null</li>
+     * </ul>
      */
     private String resolveFeatureNameForMessage(Intent intent, String matchedFeature) {
         if (intent != null && intent.isShortCircuit()) {
             return "chitchat";
+        }
+        if (intent != null && intent.isAdminCommand()) {
+            return "admin_command";
         }
         if (matchedFeature != null && !matchedFeature.isBlank()) {
             return matchedFeature;

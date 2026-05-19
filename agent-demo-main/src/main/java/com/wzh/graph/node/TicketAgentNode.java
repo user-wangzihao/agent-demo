@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wzh.agentdemo.common.entity.ChatMessage;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.ChatClientInvoker;
+import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.TokenSinkRegistry;
 import com.wzh.graph.support.TokenStreamSink;
 import lombok.RequiredArgsConstructor;
@@ -53,6 +54,15 @@ public class TicketAgentNode extends AbstractGraphNode {
             === 必须遵守 ===
             - 不要在没有工单编号的情况下调用 queryTicketStatus
             - 不要尝试自己回答用户的业务问题, 你的职责是衔接工单流程
+            
+            === 工具失败处理规则 (B5-b-2 引入) ===
+            
+            工具返回的是 JSON 字符串. 如果 JSON 中 "success": false, 说明工具执行失败.
+            此时你必须如实告知用户, 引用工具返回的 "message" 字段说明失败原因, 绝不能编造工单号或假装提交成功.
+            
+            例: submitTicket 返回 {"success":false,"message":"工单系统暂时不可用"}
+            正确回复: 抱歉, 提交工单时遇到了问题:工单系统暂时不可用, 请稍后再试。
+            错误回复: 工单已提交, 编号 TK-XXX (编造工单号, 严重违规)
             
             使用中文回答, 简短专业。
             """;
@@ -187,8 +197,8 @@ public class TicketAgentNode extends AbstractGraphNode {
      */
     @SuppressWarnings("unchecked")
     private String resolveFeatureWithFallback(OverAllState state) {
-        // 第一层:当前轮
-        String current = state.value(GraphStateKeys.MATCHED_FEATURE, String.class).orElse(null);
+        // 第一层:当前轮 (B5-b-1: 走 RouteUtil 解码, MATCHED_FEATURE 会被 Graph 1.1.2 包装成 ArrayList)
+        String current = RouteUtil.safeString(state, GraphStateKeys.MATCHED_FEATURE, null);
         if (current != null && !current.isBlank()) {
             return current;
         }
@@ -198,7 +208,11 @@ public class TicketAgentNode extends AbstractGraphNode {
         for (int i = history.size() - 1; i >= 0; i--) {
             ChatMessage m = history.get(i);
             String fn = m.getFeatureName();
-            if (fn != null && !fn.isBlank() && !"chitchat".equals(fn) && !"Chit".equals(fn)) {
+            // 跳过非 feature 类的系统标签 (chitchat / admin_command), 这些不是真实产品 feature,
+            // 不该作为工单上下文传递. B5-b-1 新增过滤 admin_command.
+            if (fn != null && !fn.isBlank()
+                    && !"chitchat".equals(fn) && !"Chit".equals(fn)
+                    && !"admin_command".equals(fn)) {
                 log.info("[{}] feature 从 history 回溯命中: {}", NODE_ID, fn);
                 return fn;
             }

@@ -22,7 +22,7 @@ import java.util.concurrent.TimeoutException;
  * <ol>
  *   <li>开启 DashScope JSON Mode ({@code response_format: {"type":"json_object"}}),
  *       SDK ≥ 2.18.4 支持. prompt 里必须包含 "JSON" 关键词.</li>
- *   <li>few-shot 4 个示例, 覆盖 4 个核心意图, 引导 LLM 按 schema 输出.</li>
+ *   <li>few-shot 6 个示例, 覆盖 5 个核心意图 (含 admin_command 的 2 个边界样本), 引导 LLM 按 schema 输出.</li>
  *   <li>{@code temperature=0.1} 保证近确定性输出, 降低分类抖动.</li>
  *   <li>超时控制: 通过 {@link CompletableFuture#orTimeout} 强制 yml 配置的超时上限,
  *       避免阻塞用户对话. 超时/异常一律降级为 FALLBACK 兜底.</li>
@@ -52,17 +52,26 @@ public class LlmIntentClassifier implements IntentClassifier {
      * System Prompt: 角色定义 + 输出 schema + few-shot 示例.
      */
     private static final String SYSTEM_PROMPT = """
-            你是一个意图分类器. 你的任务是把用户查询分类到以下 5 个意图之一, 并以 JSON 格式输出.
+            你是一个意图分类器. 你的任务是把用户查询分类到以下 6 个意图之一, 并以 JSON 格式输出.
             
             意图定义:
             - how_to: 用户想知道"怎么做". 例: "怎么改色", "如何导入"
             - troubleshoot: 用户报告错误或异常. 例: "点击没反应", "导入失败"
             - feature_intro: 用户询问某功能的定义/用途. 例: "贴片栏是什么", "改色工具用来做什么"
             - chitchat: 与产品功能无关的对话. 例: "你好", "谢谢"
+            - admin_command: 询问"知识库系统本身"的元数据/运营统计/管理操作.
+              例: "还有哪些文档没学习", "本周问得最多的问题", "触发知识库重新学习", "用户满意度统计"
             - default: 上述都不匹配, 或者意图不明确
             
+            ★ 边界判别规则 (最易混淆的点):
+            - 询问"产品功能本身"的用法/故障/介绍 → how_to / troubleshoot / feature_intro
+              即使提问者是管理员也一样 (例: 管理员问"BOM 工具怎么用" 仍是 how_to)
+            - 询问"知识库系统本身"的状态/统计/管理 → admin_command
+              (例: "看看现在还有多少知识没进库" 是 admin_command, 不是 feature_intro)
+            判断方法: 看用户问的"对象"是产品功能, 还是知识库系统.
+            
             输出格式: 严格的 JSON 对象, 包含三个字段:
-            - intent: 五个枚举值之一 (字符串)
+            - intent: 六个枚举值之一 (字符串)
             - confidence: 置信度 0.0~1.0 (数字, 不确定时给低分)
             - reasoning: 一句话简短理由 (字符串, 不超过 30 字)
             
@@ -80,9 +89,16 @@ public class LlmIntentClassifier implements IntentClassifier {
             用户查询: 你好啊
             JSON 输出: {"intent": "chitchat", "confidence": 1.0, "reasoning": "问候语"}
             
+            用户查询: 看看系统里现在有多少知识还没进库
+            JSON 输出: {"intent": "admin_command", "confidence": 0.88, "reasoning": "询问知识库入库状态"}
+            
+            用户查询: 帮我统计一下最近用户反馈的情况
+            JSON 输出: {"intent": "admin_command", "confidence": 0.85, "reasoning": "询问运营统计"}
+            
             注意:
             1. 只输出 JSON 对象, 不要任何其他文字、Markdown 标记或注释
             2. 意图不明确时, 给低 confidence 并选 default
+            3. 区分 admin_command 与 how_to 时, 看用户问的对象是"产品功能"还是"知识库系统"
             """;
 
     /** LLM 调用模型名 (固定 qwen-turbo, 性价比最优). */

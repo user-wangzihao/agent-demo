@@ -5,6 +5,7 @@ import com.wzh.agentdemo.common.entity.ChatMessage;
 import com.wzh.enums.Intent;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.ChatClientInvoker;
+import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.SystemPromptBuilder;
 import com.wzh.graph.support.TokenSinkRegistry;
 import com.wzh.graph.support.TokenStreamSink;
@@ -61,7 +62,9 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
         String enhanced = state.value(GraphStateKeys.ENHANCED_MESSAGE, String.class)
                 .orElse(state.value(GraphStateKeys.USER_MESSAGE, String.class).orElse(""));
         String userRole = state.value(GraphStateKeys.USER_ROLE, String.class).orElse("user");
-        Intent intent = state.value(GraphStateKeys.INTENT, Intent.class).orElse(Intent.DEFAULT);
+        // B5-b-1: INTENT 走 RouteUtil 解码 (修复 Graph 1.1.2 ArrayList 包装导致 SystemPromptBuilder
+        //   意图风格模板从未生效的潜伏 bug)
+        Intent intent = RouteUtil.safeIntent(state);
         List<SearchResult> processedDoc = (List<SearchResult>) state
                 .value(GraphStateKeys.RETRIEVED_DOC_CHUNKS).orElse(Collections.emptyList());
         List<SearchResult> processedFaq = (List<SearchResult>) state

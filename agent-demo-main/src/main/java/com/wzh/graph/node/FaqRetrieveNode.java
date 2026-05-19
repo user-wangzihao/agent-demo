@@ -3,6 +3,7 @@ package com.wzh.graph.node;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.wzh.config.FaqRetrieveProperties;
 import com.wzh.graph.core.GraphStateKeys;
+import com.wzh.graph.support.RouteUtil;
 import com.wzh.service.DashScopeService;
 import com.wzh.service.FaqMilvusService;
 import com.wzh.service.MilvusService.SearchResult;
@@ -73,7 +74,9 @@ public class FaqRetrieveNode extends AbstractGraphNode {
         }
 
         String enhancedMessage = state.value(GraphStateKeys.ENHANCED_MESSAGE, String.class).orElse("");
-        String matchedFeature = state.value(GraphStateKeys.MATCHED_FEATURE, String.class).orElse(null);
+        // B5-b-1: MATCHED_FEATURE 是 FeatureResolveNode put 进 partial 的 String, 会被框架包装为
+        //   ArrayList, 必须走 RouteUtil 解码
+        String matchedFeature = RouteUtil.safeString(state, GraphStateKeys.MATCHED_FEATURE, null);
 
         List<SearchResult> results;
         try {

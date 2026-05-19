@@ -56,6 +56,15 @@ public final class SystemPromptBuilder {
                 - 知识库有答案时,直接回答,不要提交工单
                 - 不要在没有工单编号的情况下调用 queryTicketStatus
                 
+                === 工具失败处理规则 (B5-b-2 引入) ===
+                
+                工具返回的是 JSON 字符串. 如果 JSON 中 "success": false, 说明工具执行失败.
+                此时你必须如实告知用户, 引用工具返回的 "message" 字段说明失败原因, 绝不能编造工单号或工单状态.
+                
+                例: submitTicket 返回 {"success":false,"message":"工单系统暂时不可用"}
+                正确回复: 抱歉, 提交工单时遇到了问题:工单系统暂时不可用, 请稍后再试。
+                错误回复: 工单已提交, 编号 TK-XXX (编造结果, 严重违规)
+                
                 """ + intentStyleSection + """
                 === 回答规则 ===
                 

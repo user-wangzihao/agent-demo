@@ -11,19 +11,29 @@ import java.util.Optional;
 /**
  * 用户查询意图分类.
  *
- * <p>4 + 1 分类设计:
+ * <p>5 + 1 分类设计 (业务意图 + 管理员指令 + 兜底):
  * <ul>
- *   <li>{@link #HOW_TO}        - 操作指引类: "怎么做"、"如何"、"步骤"</li>
- *   <li>{@link #TROUBLESHOOT}  - 故障排查类: "报错"、"无法"、"失败"</li>
- *   <li>{@link #FEATURE_INTRO} - 功能介绍类: "是什么"、"有什么用"</li>
- *   <li>{@link #CHITCHAT}      - 闲聊类: "你好"、"谢谢"</li>
- *   <li>{@link #DEFAULT}       - 兜底类: 上述都不匹配 / LLM 失败 / 置信度低</li>
+ *   <li>{@link #HOW_TO}         - 操作指引类: "怎么做"、"如何"、"步骤"</li>
+ *   <li>{@link #TROUBLESHOOT}   - 故障排查类: "报错"、"无法"、"失败"</li>
+ *   <li>{@link #FEATURE_INTRO}  - 功能介绍类: "是什么"、"有什么用"</li>
+ *   <li>{@link #CHITCHAT}       - 闲聊类: "你好"、"谢谢"; 短路到 chitchat_answer</li>
+ *   <li>{@link #ADMIN_COMMAND}  - 管理员指令类: 询问知识库元数据/运营统计/管理操作;
+ *                                短路到 admin_agent (需 userRole=admin, 否则降级)</li>
+ *   <li>{@link #DEFAULT}        - 兜底类: 上述都不匹配 / LLM 失败 / 置信度低</li>
+ * </ul>
+ *
+ * <p><b>边界划分 (HOW_TO vs ADMIN_COMMAND)</b>: 询问对象决定意图归属.
+ * <ul>
+ *   <li>询问<b>产品功能本身</b>的用法/故障/介绍 → HOW_TO / TROUBLESHOOT / FEATURE_INTRO,
+ *       即使提问者是管理员 (例: "BOM 工具怎么用")</li>
+ *   <li>询问<b>知识库系统本身</b>的元数据/统计/管理操作 → ADMIN_COMMAND
+ *       (例: "还有多少文档没学习", "本周问得最多的问题")</li>
  * </ul>
  *
  * <p>下游使用方:
  * <ul>
- *   <li>{@code AgentService} - chitchat 短路, 其他类型走 RAG 分支</li>
- *   <li>{@code chunk type boost} - 不同意图加权不同的 chunk_type</li>
+ *   <li>{@code MainGraphConfig.routeAfterIntent} - chitchat / admin_command 短路, 其他类型进 RAG 分支</li>
+ *   <li>{@code chunk type boost} - 不同意图加权不同的 chunk_type (CHITCHAT/ADMIN_COMMAND/DEFAULT 不加权)</li>
  *   <li>{@code SystemPromptBuilder} - 不同意图使用不同的回答风格模板</li>
  * </ul>
  *
@@ -50,6 +60,24 @@ public enum Intent {
 
     /** 闲聊: 与产品功能无关的对话. 短路, 不走 RAG. */
     CHITCHAT("chitchat", "闲聊", null),
+
+    /**
+     * 管理员指令: 询问知识库系统本身的元数据/运营统计/管理操作.
+     *
+     * <p><b>典型例子</b>: "还有哪些文档没学习", "本周问得最多的问题",
+     * "触发知识库重新学习", "统计用户满意度".</p>
+     *
+     * <p><b>路由行为</b>: 在 {@code routeAfterIntent} 阶段短路到 admin_agent 节点,
+     * 不走 RAG 链路 (不调用 feature_resolve / doc_retrieve / faq_retrieve / merger),
+     * 因为这类问题靠管理员工具调用回答, 与知识库 chunk 无关.</p>
+     *
+     * <p><b>userRole 校验</b>: 在路由层 ({@code routeAfterIntent}) 而非分类层做.
+     * 非管理员用户即使被分类为 ADMIN_COMMAND, 也降级到 knowledge_answer 而非拒绝.
+     * 真正的权限边界由 ChatClient 工具集隔离 (Batch 2) 物理保证.</p>
+     *
+     * <p><b>不加权</b>: boostChunkType=null, 因为不走 RAG.</p>
+     */
+    ADMIN_COMMAND("admin_command", "管理员指令", null),
 
     /** 兜底: 未识别 / LLM 失败 / 置信度低. 走原有未分支流程. */
     DEFAULT("default", "默认", null);
@@ -131,9 +159,26 @@ public enum Intent {
     }
 
     /**
-     * 是否为闲聊短路意图 (跳过 RAG 流程).
+     * 是否为闲聊短路意图 (跳过 RAG 流程, 直接到 chitchat_answer).
+     *
+     * <p><b>注意</b>: 仅 CHITCHAT 返回 true. ADMIN_COMMAND 虽然也跳过 RAG,
+     * 但短路目标是 admin_agent 而非 chitchat_answer, 路由层独立判定,
+     * 不复用此方法 (否则 admin 流量会被错误路由到 chitchat_answer).</p>
      */
     public boolean isShortCircuit() {
         return this == CHITCHAT;
+    }
+
+    /**
+     * 是否为管理员指令意图 (跳过 RAG 流程, 短路到 admin_agent).
+     *
+     * <p>与 {@link #isShortCircuit()} 配合, 在 {@code routeAfterIntent} 实现三分流:
+     * chitchat / admin_command / 其他 (进 RAG 链路).</p>
+     *
+     * <p>路由层还需结合 {@code userRole == admin} 才真正进 admin_agent,
+     * 此方法只表达"意图本身是不是管理员指令", 不含权限判断.</p>
+     */
+    public boolean isAdminCommand() {
+        return this == ADMIN_COMMAND;
     }
 }

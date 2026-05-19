@@ -22,33 +22,38 @@ import static com.alibaba.cloud.ai.graph.action.AsyncEdgeAction.edge_async;
 import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
 
 /**
- * 主对话 Graph 的装配配置 (第四刀升级版).
+ * 主对话 Graph 的装配配置 (B5-b-1 升级版).
  *
- * <p><b>Graph 形状 (第四刀)</b>:
+ * <p><b>Graph 形状 (B5-b-1)</b>:
  * <pre>
  *   __START__
  *      → preprocess
- *      → intent ──(chitchat 短路)──→ chitchat_answer ──→ finalize → __END__
- *           ↓
- *      → feature_resolve ─┬→ doc_retrieve ─┐
- *                         └→ faq_retrieve ─┴→ merger
- *      → merger ──┬─(admin_meta)──→ admin_agent     ─┐
- *                 ├─(ticket)─────→ ticket_agent     ─┤
+ *      → intent ──(chitchat 短路)──→ chitchat_answer ──┐
+ *           │                                          │
+ *           ├──(admin_command + admin 短路)──→ admin_agent ──┤
+ *           │                                          │
+ *           ↓                                          │
+ *      → feature_resolve ─┬→ doc_retrieve ─┐           │
+ *                         └→ faq_retrieve ─┴→ merger   │
+ *      → merger ──┬─(ticket)─────→ ticket_agent     ─┤
  *                 └─(default)────→ knowledge_answer ─┤
  *                                                    ↓
  *                                                 finalize → __END__
  * </pre></p>
  *
- * <p><b>变更点 vs 3.C</b>:
+ * <p><b>变更点 vs 第四刀</b>:
  * <ul>
- *   <li>新增 faq_retrieve 节点 (与 doc_retrieve 并行)</li>
- *   <li>feature_resolve → doc_retrieve / faq_retrieve 两条边触发 fan-out</li>
- *   <li>doc_retrieve / faq_retrieve → merger 两条边自动 fan-in</li>
- * </ul>
- * 并行表达方式参考 Spring AI Alibaba Graph 官方 parallel-node 示例.</p>
+ *   <li>routeAfterIntent 从二分流升级为三分流 — admin_command 在 intent 阶段直接短路到
+ *       admin_agent, 不走 RAG. 这把"管理员意图"从正则关键词后置判定 (做法 X) 升级为
+ *       LLM/关键词分类一等公民 (做法 Y), 路由层只做映射不做判断.</li>
+ *   <li>routeAfterMerger 简化为 ticket / knowledge 二选一, isAdminMetaQuery 路径已退役.</li>
+ *   <li>所有 state 取值走 RouteUtil.safeIntent / safeString, 修复 Graph 1.1.2 把枚举
+ *       序列化为 ArrayList 导致 state.value(K, Intent.class) 静默 fallback DEFAULT 的潜伏 bug.
+ *       影响范围: chitchat 短路、IntentBoost 加权、SystemPrompt 风格模板, 此前全部未生效.</li>
+ * </ul></p>
  *
  * @author wzh
- * @since 2026-05-13
+ * @since 2026-05-13 (第四刀); 2026-05-19 (B5-b-1 重构)
  */
 @Slf4j
 @Configuration
@@ -139,12 +144,13 @@ public class MainGraphConfig {
                 // ============ 入口边 ============
                 .addEdge(StateGraph.START, NODE_PREPROCESS)
                 .addEdge(NODE_PREPROCESS, NODE_INTENT)
-                // ============ 分流 ① intent 之后: chitchat 短路 ============
+                // ============ 分流 ① intent 之后: chitchat 短路 / admin_command 短路 / 进 RAG ============
                 .addConditionalEdges(
                         NODE_INTENT,
                         edge_async(this::routeAfterIntent),
                         Map.of(
                                 NODE_CHITCHAT_ANSWER, NODE_CHITCHAT_ANSWER,
+                                NODE_ADMIN_AGENT, NODE_ADMIN_AGENT,
                                 NODE_FEATURE_RESOLVE, NODE_FEATURE_RESOLVE
                         ))
                 // ============ ★ 并行 fan-out: feature_resolve → doc_retrieve / faq_retrieve ============
@@ -153,12 +159,11 @@ public class MainGraphConfig {
                 // ============ ★ 并行 fan-in: doc_retrieve / faq_retrieve → merger ============
                 .addEdge(NODE_DOC_RETRIEVE, NODE_MERGER)
                 .addEdge(NODE_FAQ_RETRIEVE, NODE_MERGER)
-                // ============ 分流 ② merger 之后: 三选一 ============
+                // ============ 分流 ② merger 之后: 二选一 (B5-b-1: admin 已在 intent 阶段短路出去) ============
                 .addConditionalEdges(
                         NODE_MERGER,
                         edge_async(this::routeAfterMerger),
                         Map.of(
-                                NODE_ADMIN_AGENT, NODE_ADMIN_AGENT,
                                 NODE_TICKET_AGENT, NODE_TICKET_AGENT,
                                 NODE_KNOWLEDGE_ANSWER, NODE_KNOWLEDGE_ANSWER
                         ))
@@ -170,32 +175,46 @@ public class MainGraphConfig {
                 .addEdge(NODE_FINALIZE, StateGraph.END);
 
         CompiledGraph compiled = graph.compile();
-        log.info("[MainGraphConfig] mainGraph compiled: 11 nodes, 2 conditionalEdges, "
-                + "1 parallel fanout (第四刀: Doc + FAQ 并行检索)");
+        log.info("[MainGraphConfig] mainGraph compiled: 11 nodes, 2 conditionalEdges "
+                + "(routeAfterIntent=3-way: chitchat/admin/RAG; routeAfterMerger=2-way: ticket/knowledge), "
+                + "1 parallel fanout (Doc + FAQ 并行检索)");
         return compiled;
     }
 
-    // ==================== ConditionalEdge 判定 (未改动) ====================
+    // ==================== ConditionalEdge 判定 (B5-b-1 升级: 走 RouteUtil 解码层) ====================
+    //
+    // 第六刀 B5-b-1 关键变更:
+    // 1. routeAfterIntent 从二分流升级为三分流, ADMIN_COMMAND 在 intent 后直接短路到 admin_agent,
+    //    不走 RAG (不调 feature_resolve / doc_retrieve / faq_retrieve / merger).
+    // 2. routeAfterMerger 简化为 ticket / knowledge 二选一; 原 isAdminMetaQuery 路径已移除.
+    // 3. 所有 state 取值改走 RouteUtil.safeIntent / safeString, 修复 Graph 1.1.2 把枚举
+    //    序列化为 ArrayList 导致 state.value(K, Intent.class) 静默 fallback 的潜伏 bug.
 
     private String routeAfterIntent(OverAllState state) {
-        Intent intent = state.value(GraphStateKeys.INTENT, Intent.class).orElse(Intent.DEFAULT);
+        Intent intent = RouteUtil.safeIntent(state);
+        String userRole = RouteUtil.safeString(state, GraphStateKeys.USER_ROLE, "user");
+
         if (RouteUtil.isChitchat(intent)) {
             log.info("[route@intent] intent={} → chitchat_answer (short circuit)", intent.getCode());
             return NODE_CHITCHAT_ANSWER;
         }
+        if (RouteUtil.isAdminCommand(intent, userRole)) {
+            log.info("[route@intent] intent={} userRole={} → admin_agent (short circuit, skip RAG)",
+                    intent.getCode(), userRole);
+            return NODE_ADMIN_AGENT;
+        }
+        // 含: 业务意图 (how_to/troubleshoot/feature_intro/default)
+        //   + 非 admin 用户被分类为 admin_command 时的降级 (走正常 RAG)
+        log.info("[route@intent] intent={} userRole={} → feature_resolve (RAG)",
+                intent.getCode(), userRole);
         return NODE_FEATURE_RESOLVE;
     }
 
     private String routeAfterMerger(OverAllState state) {
-        String query = state.value(GraphStateKeys.ENHANCED_MESSAGE, String.class)
-                .orElse(state.value(GraphStateKeys.USER_MESSAGE, String.class).orElse(""));
-        String userRole = state.value(GraphStateKeys.USER_ROLE, String.class).orElse("user");
-        Intent intent = state.value(GraphStateKeys.INTENT, Intent.class).orElse(Intent.DEFAULT);
+        String query = RouteUtil.safeString(state, GraphStateKeys.ENHANCED_MESSAGE,
+                RouteUtil.safeString(state, GraphStateKeys.USER_MESSAGE, ""));
+        Intent intent = RouteUtil.safeIntent(state);
 
-        if (RouteUtil.isAdminMetaQuery(query, userRole)) {
-            log.info("[route@merger] userRole={} → admin_agent", userRole);
-            return NODE_ADMIN_AGENT;
-        }
         if (RouteUtil.isTicketIntent(query, intent)) {
             log.info("[route@merger] query matched ticket pattern → ticket_agent");
             return NODE_TICKET_AGENT;

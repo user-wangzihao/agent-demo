@@ -3,6 +3,7 @@ package com.wzh.graph.node;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.wzh.enums.Intent;
 import com.wzh.graph.core.GraphStateKeys;
+import com.wzh.graph.support.RouteUtil;
 import com.wzh.service.MilvusService.SearchResult;
 import com.wzh.service.ProductionRetrieveService;
 import com.wzh.service.intent.IntentBoostUtil;
@@ -52,9 +53,13 @@ public class DocRetrieveNode extends AbstractGraphNode {
 
     @Override
     protected Map<String, Object> doApply(OverAllState state) {
+        // B5-b-1: ENHANCED_MESSAGE 是 Controller 直接 put 进 initial 的 String, 不经节点 partial,
+        //   多数情况下没被框架包装, 沿用 state.value 取即可.
+        // MATCHED_FEATURE / INTENT 都是节点 put 进 partial 的, 必须走 RouteUtil 解码,
+        //   否则会被框架的 ArrayList 包装害到拿不到值, IntentBoost 形同虚设.
         String enhancedMessage = state.value(GraphStateKeys.ENHANCED_MESSAGE, String.class).orElse("");
-        String matchedFeature = state.value(GraphStateKeys.MATCHED_FEATURE, String.class).orElse(null);
-        Intent intent = state.value(GraphStateKeys.INTENT, Intent.class).orElse(Intent.DEFAULT);
+        String matchedFeature = RouteUtil.safeString(state, GraphStateKeys.MATCHED_FEATURE, null);
+        Intent intent = RouteUtil.safeIntent(state);
 
         // 调用复用现有流水线, 跳过 resolveFeature
         List<SearchResult> rawResults = productionRetrieveService.retrieveByMatchedFeature(
