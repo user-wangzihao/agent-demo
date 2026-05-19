@@ -4,14 +4,14 @@
  Source Server         : 京东云
  Source Server Type    : MySQL
  Source Server Version : 90600 (9.6.0)
- Source Host           : 36.150.236.251:3306
+ Source Host           : 36.150.236.251:3337
  Source Schema         : agent_demo
 
  Target Server Type    : MySQL
  Target Server Version : 90600 (9.6.0)
  File Encoding         : 65001
 
- Date: 15/05/2026 10:54:12
+ Date: 19/05/2026 17:44:16
 */
 
 SET NAMES utf8mb4;
@@ -46,7 +46,7 @@ CREATE TABLE `faq_candidate`  (
   UNIQUE INDEX `uk_source_ticket`(`source_ticket_id` ASC) USING BTREE COMMENT '一个工单最多对应一条候选',
   INDEX `idx_review_status`(`review_status` ASC) USING BTREE,
   INDEX `idx_create_time`(`create_time` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'FAQ候选池(来自工单系统)' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = 'FAQ候选池(来自工单系统)' ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of faq_candidate

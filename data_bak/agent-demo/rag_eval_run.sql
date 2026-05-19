@@ -4,14 +4,14 @@
  Source Server         : 京东云
  Source Server Type    : MySQL
  Source Server Version : 90600 (9.6.0)
- Source Host           : 36.150.236.251:3306
+ Source Host           : 36.150.236.251:3337
  Source Schema         : agent_demo
 
  Target Server Type    : MySQL
  Target Server Version : 90600 (9.6.0)
  File Encoding         : 65001
 
- Date: 15/05/2026 10:54:32
+ Date: 19/05/2026 17:44:35
 */
 
 SET NAMES utf8mb4;
@@ -34,7 +34,7 @@ CREATE TABLE `rag_eval_run`  (
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_pipeline_time`(`pipeline` ASC, `created_at` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 24 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = 'RAG 评估运行结果' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 24 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = 'RAG 评估运行结果' ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of rag_eval_run

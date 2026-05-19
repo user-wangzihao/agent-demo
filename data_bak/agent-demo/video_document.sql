@@ -4,14 +4,14 @@
  Source Server         : 京东云
  Source Server Type    : MySQL
  Source Server Version : 90600 (9.6.0)
- Source Host           : 36.150.236.251:3306
+ Source Host           : 36.150.236.251:3337
  Source Schema         : agent_demo
 
  Target Server Type    : MySQL
  Target Server Version : 90600 (9.6.0)
  File Encoding         : 65001
 
- Date: 15/05/2026 10:54:58
+ Date: 19/05/2026 17:44:51
 */
 
 SET NAMES utf8mb4;
@@ -35,11 +35,11 @@ CREATE TABLE `video_document`  (
   `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_feature_id`(`feature_id` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '视频信息表' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 2 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '视频信息表' ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of video_document
 -- ----------------------------
-INSERT INTO `video_document` VALUES (1, 1, '赋注解属性.mp4', 'http://36.150.236.251:9000/agent-demo/2026/03/17/f886d77cf5cd4d48b706c248e22c9460.mp4', 35225059, 'video/mp4', NULL, 0, 0, '2026-03-17 11:08:39', '2026-03-17 11:08:39');
+INSERT INTO `video_document` VALUES (1, 1, '赋注解属性.mp4', 'http://36.150.236.251:9000/agent-demo/2026/03/17/f886d77cf5cd4d48b706c248e22c9460.mp4', 35225059, 'video/mp4', NULL, 2, 0, '2026-03-17 11:08:39', '2026-03-17 11:08:39');
 
 SET FOREIGN_KEY_CHECKS = 1;

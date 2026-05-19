@@ -4,14 +4,14 @@
  Source Server         : 京东云
  Source Server Type    : MySQL
  Source Server Version : 90600 (9.6.0)
- Source Host           : 36.150.236.251:3306
+ Source Host           : 36.150.236.251:3337
  Source Schema         : agent_demo
 
  Target Server Type    : MySQL
  Target Server Version : 90600 (9.6.0)
  File Encoding         : 65001
 
- Date: 15/05/2026 10:54:39
+ Date: 19/05/2026 17:44:40
 */
 
 SET NAMES utf8mb4;
@@ -34,7 +34,7 @@ CREATE TABLE `rag_eval_set`  (
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_category`(`category` ASC) USING BTREE,
   INDEX `idx_enabled`(`enabled` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 25 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = 'RAG 评估集' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 25 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = 'RAG 评估集' ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of rag_eval_set

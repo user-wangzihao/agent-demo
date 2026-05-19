@@ -4,14 +4,14 @@
  Source Server         : 京东云
  Source Server Type    : MySQL
  Source Server Version : 90600 (9.6.0)
- Source Host           : 36.150.236.251:3306
+ Source Host           : 36.150.236.251:3337
  Source Schema         : agent_demo
 
  Target Server Type    : MySQL
  Target Server Version : 90600 (9.6.0)
  File Encoding         : 65001
 
- Date: 15/05/2026 10:54:06
+ Date: 19/05/2026 17:44:08
 */
 
 SET NAMES utf8mb4;
@@ -30,7 +30,7 @@ CREATE TABLE `chat_session`  (
   `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_user_id`(`user_id` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 53 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '会话表' ROW_FORMAT = Dynamic;
+) ENGINE = InnoDB AUTO_INCREMENT = 69 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '会话表' ROW_FORMAT = DYNAMIC;
 
 -- ----------------------------
 -- Records of chat_session
@@ -87,5 +87,21 @@ INSERT INTO `chat_session` VALUES (49, 1, '我在使用快速涂色功能的时�
 INSERT INTO `chat_session` VALUES (50, 1, '我在使用快速涂色功能的时候,为什么上色功能失败？弹出个提示框...', 0, '2026-05-15 08:25:12', '2026-05-15 08:25:25');
 INSERT INTO `chat_session` VALUES (51, 1, '我在使用快速涂色功能的时候,为什么上色功能失败？弹出个提示框...', 0, '2026-05-15 09:39:48', '2026-05-15 09:40:02');
 INSERT INTO `chat_session` VALUES (52, 1, '我在使用快速涂色功能的时候,为什么上色功能失败？弹出个提示框...', 0, '2026-05-15 10:02:40', '2026-05-15 10:02:52');
+INSERT INTO `chat_session` VALUES (53, 1, '当前还有多少个没有学习的文档？', 0, '2026-05-18 19:17:19', '2026-05-18 19:21:22');
+INSERT INTO `chat_session` VALUES (54, 1, '你好', 0, '2026-05-18 19:46:34', '2026-05-18 19:46:41');
+INSERT INTO `chat_session` VALUES (55, 1, '我在使用快速涂色功能的时候,为什么上色功能失败？弹出个提示框...', 0, '2026-05-18 19:47:06', '2026-05-18 19:59:07');
+INSERT INTO `chat_session` VALUES (56, 1, '现在还有多少没有学习的文档？', 0, '2026-05-18 19:49:43', '2026-05-18 19:49:53');
+INSERT INTO `chat_session` VALUES (57, 1, 'hello', 0, '2026-05-18 20:00:05', '2026-05-18 20:00:07');
+INSERT INTO `chat_session` VALUES (58, 3, '你好', 0, '2026-05-19 11:14:55', '2026-05-19 11:15:02');
+INSERT INTO `chat_session` VALUES (59, 3, 'BOM 工具怎么用？', 0, '2026-05-19 11:16:26', '2026-05-19 11:16:33');
+INSERT INTO `chat_session` VALUES (60, 3, '还有多少文档没学习', 0, '2026-05-19 11:17:35', '2026-05-19 11:17:38');
+INSERT INTO `chat_session` VALUES (61, 1, '还有多少文档没学习？', 1, '2026-05-19 11:21:36', '2026-05-19 06:05:58');
+INSERT INTO `chat_session` VALUES (62, 1, '还有多少文档没学习？', 1, '2026-05-19 11:29:19', '2026-05-19 06:05:57');
+INSERT INTO `chat_session` VALUES (63, 3, '还有多少文档没学习？', 0, '2026-05-19 11:29:52', '2026-05-19 11:29:57');
+INSERT INTO `chat_session` VALUES (64, 1, '还有多少文档没学习', 1, '2026-05-19 14:05:27', '2026-05-19 06:05:43');
+INSERT INTO `chat_session` VALUES (65, 1, '还有多少文档没学习', 0, '2026-05-19 14:13:23', '2026-05-19 14:13:36');
+INSERT INTO `chat_session` VALUES (66, 1, '还有多少文档没学习？', 0, '2026-05-19 14:14:23', '2026-05-19 14:14:25');
+INSERT INTO `chat_session` VALUES (67, 3, '还有多少文档没学习？', 0, '2026-05-19 14:17:23', '2026-05-19 14:17:34');
+INSERT INTO `chat_session` VALUES (68, 1, '你好', 0, '2026-05-19 14:18:52', '2026-05-19 14:18:53');
 
 SET FOREIGN_KEY_CHECKS = 1;
