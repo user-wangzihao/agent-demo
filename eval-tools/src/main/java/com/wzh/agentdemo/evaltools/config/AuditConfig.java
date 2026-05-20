@@ -56,4 +56,38 @@ public final class AuditConfig {
      * <p>用于调用 /internal/eval/intent (Batch 3 主应用侧新增) 等评估端点.</p>
      */
     public static final String INTERNAL_API_KEY = "internal-secret-key-change-me";
+
+    // ============ 评估 CI Batch 6 (端到端延迟) 追加 ============
+
+    /**
+     * 端到端延迟评估用的测试账号 (主应用 sys_user 表, role=user).
+     * <p>评估器启动时调 /api/auth/login 拿 token, 之后所有 SSE 请求带此 token.
+     * 优先从环境变量 EVAL_USER 读, 缺失则用此默认值. 主应用密码当前为明文比对.</p>
+     * <p><b>DB 准备</b>: 评估前需在主应用 sys_user 表插入此账号. 已知存在记录:
+     * id=3, username=user, password=user123, role=user.</p>
+     */
+    public static final String EVAL_USERNAME_DEFAULT = "user";
+    public static final String EVAL_PASSWORD_DEFAULT = "user123";
+
+    /**
+     * 解析评估账号 (env 优先, 默认值兜底). 单独抽方法是为了测试时易于 mock.
+     */
+    public static String resolveEvalUsername() {
+        String env = System.getenv("EVAL_USER");
+        return env != null && !env.isBlank() ? env : EVAL_USERNAME_DEFAULT;
+    }
+
+    public static String resolveEvalPassword() {
+        String env = System.getenv("EVAL_PASSWORD");
+        return env != null && !env.isBlank() ? env : EVAL_PASSWORD_DEFAULT;
+    }
+
+    // ============ 延迟评估参数 (Batch 6) ============
+
+    /** 每个 query 跑总轮数 (含 warmup) */
+    public static final int LATENCY_TOTAL_RUNS = 3;
+    /** 前 N 轮作为 warmup 丢弃, 不计入指标 */
+    public static final int LATENCY_WARMUP_RUNS = 1;
+    /** 单次 SSE 请求超时 (秒). 60s 容忍最坏 LLM 兜底. */
+    public static final int LATENCY_SSE_TIMEOUT_SEC = 60;
 }
