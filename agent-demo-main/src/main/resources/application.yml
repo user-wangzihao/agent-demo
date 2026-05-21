@@ -253,6 +253,7 @@ intent:
       - 你叫什么
       - 早上好
       - 晚上好
+      - 天气
 
     # 管理员指令意图 (第六刀 B5-b-1 引入): 询问知识库系统本身的元数据/运营统计/管理操作.
     # 路由层会结合 userRole=admin 决定是否真正进入 admin_agent, 非管理员降级到 knowledge_answer.

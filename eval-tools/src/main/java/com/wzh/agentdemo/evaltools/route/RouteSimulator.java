@@ -78,7 +78,7 @@ public final class RouteSimulator {
      * <p><b>同步源</b>: {@code com.wzh.graph.support.RouteUtil.TICKET_PATTERN}.</p>
      */
     private static final Pattern TICKET_PATTERN = Pattern.compile(
-            ".*(转人工|转给技术|提.*工单|提交工单|人工处理|联系客服|工单号|工单状态|TK-\\d+).*"
+            ".*(转人工|转给技术|提.*工单|提交工单|人工处理|联系.{0,4}客服|工单号|工单状态|TK-\\d+).*"
     );
 
     // ==================== 单个判定 (对齐 RouteUtil 同名方法) ====================

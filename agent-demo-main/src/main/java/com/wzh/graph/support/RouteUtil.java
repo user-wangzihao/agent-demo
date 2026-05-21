@@ -61,9 +61,9 @@ public final class RouteUtil {
 
     private RouteUtil() {}
 
-    /** 工单意图关键词 (未变). */
+    /** 工单意图关键词. */
     private static final Pattern TICKET_PATTERN = Pattern.compile(
-            ".*(转人工|转给技术|提.*工单|提交工单|人工处理|联系客服|工单号|工单状态|TK-\\d+).*"
+            ".*(转人工|转给技术|提.*工单|提交工单|人工处理|联系.{0,4}客服|工单号|工单状态|TK-\\d+).*"
     );
 
     // ==================== 路由判定 ====================

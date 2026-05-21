@@ -58,17 +58,29 @@ public class LlmIntentClassifier implements IntentClassifier {
             - how_to: 用户想知道"怎么做". 例: "怎么改色", "如何导入"
             - troubleshoot: 用户报告错误或异常. 例: "点击没反应", "导入失败"
             - feature_intro: 用户询问某功能的定义/用途. 例: "贴片栏是什么", "改色工具用来做什么"
-            - chitchat: 与产品功能无关的对话. 例: "你好", "谢谢"
+            - chitchat: 社交性闲聊或与 AI 助手本身有关的对话.
+              包括: 问候 / 感谢 / 道别 / 询问 AI 身份能力 / 关于天气时间等寒暄.
+              例: "你好", "谢谢", "你是谁", "今天天气怎么样"
             - admin_command: 询问"知识库系统本身"的元数据/运营统计/管理操作.
               例: "还有哪些文档没学习", "本周问得最多的问题", "触发知识库重新学习", "用户满意度统计"
-            - default: 上述都不匹配, 或者意图不明确
+            - default: 用户在跟系统对话, 但问题不属于上述任何一类. 包括:
+              1) 通用知识问答 (例: "地球到月球多远")
+              2) 创作/写作/翻译任务请求 (例: "帮我写一首诗", "翻译这段话")
+              3) 用户查询自己提交的工单状态 / 表达想转人工 (例: "我的工单 TK-xxx 状态", "转人工")
+              4) 主观偏好或客观事实的二选一 / 价值判断 (例: "苹果和橘子哪个好吃")
+              5) 无法归类的兜底
             
             ★ 边界判别规则 (最易混淆的点):
             - 询问"产品功能本身"的用法/故障/介绍 → how_to / troubleshoot / feature_intro
               即使提问者是管理员也一样 (例: 管理员问"BOM 工具怎么用" 仍是 how_to)
             - 询问"知识库系统本身"的状态/统计/管理 → admin_command
               (例: "看看现在还有多少知识没进库" 是 admin_command, 不是 feature_intro)
-            判断方法: 看用户问的"对象"是产品功能, 还是知识库系统.
+            - 用户问"自己的工单"状态 → default, 不是 admin_command
+              (admin_command 是管理员问"系统层面的工单/数据统计", 不是用户问"我自己提的那张单")
+            - chitchat 仅限社交性短语和关于 AI 自身的对话. 一切实质性问题
+              (创作、翻译、二选一、知识问答) 都属于 default, 不是 chitchat.
+            判断方法: 先看是否社交寒暄 (chitchat); 再看是否产品功能问题 (how_to/troubleshoot/feature_intro);
+            再看是否系统管理问题 (admin_command); 都不是 → default.
             
             输出格式: 严格的 JSON 对象, 包含三个字段:
             - intent: 六个枚举值之一 (字符串)
@@ -95,10 +107,20 @@ public class LlmIntentClassifier implements IntentClassifier {
             用户查询: 帮我统计一下最近用户反馈的情况
             JSON 输出: {"intent": "admin_command", "confidence": 0.85, "reasoning": "询问运营统计"}
             
+            用户查询: 我的工单 TK-20240101001 处理得怎么样
+            JSON 输出: {"intent": "default", "confidence": 0.9, "reasoning": "用户查询自有工单, 非系统管理"}
+            
+            用户查询: 周一开会还是周二开会比较好
+            JSON 输出: {"intent": "default", "confidence": 0.85, "reasoning": "二选一判断, 非产品/系统/闲聊"}
+            
+            用户查询: 帮我写一封请假邮件
+            JSON 输出: {"intent": "default", "confidence": 0.9, "reasoning": "创作任务请求, 非闲聊"}
+            
             注意:
             1. 只输出 JSON 对象, 不要任何其他文字、Markdown 标记或注释
-            2. 意图不明确时, 给低 confidence 并选 default
-            3. 区分 admin_command 与 how_to 时, 看用户问的对象是"产品功能"还是"知识库系统"
+            2. 不要因为"必须选一个"就把非产品/非系统的问题硬塞进 chitchat —— 这类问题应该是 default.
+               chitchat 仅限社交寒暄, default 才是"用户在和你对话但问题不在你专业范畴"的兜底.
+            3. 区分 admin_command 与其他: 看用户问的对象是"产品功能/知识库系统"还是"用户自己的事".
             """;
 
     /** LLM 调用模型名 (固定 qwen-turbo, 性价比最优). */
