@@ -3,6 +3,26 @@ server:
   servlet:
     context-path: /
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: prometheus,health,info
+      base-path: /actuator
+  endpoint:
+    prometheus:
+      enabled: true
+    health:
+      enabled: true
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
 spring:
   application:
     name: AgentDemo

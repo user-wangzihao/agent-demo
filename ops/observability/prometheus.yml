@@ -1,0 +1,44 @@
+# =============================================================================
+# Prometheus 配置 - AgentDemo 项目可观测性主线
+# =============================================================================
+# 部署位置: 项目根目录 ops/observability/prometheus.yml
+# 启动方式: prometheus.exe --config.file=ops/observability/prometheus.yml
+# 详见同目录 README.md
+#
+# 设计要点:
+#   - scrape_interval=15s: 演示场景足够稀疏, 减少本机内存占用
+#   - retention=7d: 命令行参数指定, 不在本文件里
+#   - 仅一个抓取目标: AgentDemo 主应用 localhost:9999
+# =============================================================================
+
+global:
+  # 抓取频率: 15s 是 Prometheus 业界惯例
+  # 低于此值数据点过密浪费内存, 高于此值时序图会出现锯齿
+  scrape_interval: 15s
+
+  # 规则评估频率: 我们目前不用 alerting rules, 保持默认即可
+  evaluation_interval: 15s
+
+  # 加在所有时序的外部 label, 用于多集群区分; demo 单实例不需要可省
+  # external_labels:
+  #   environment: dev
+
+# =============================================================================
+# 抓取目标
+# =============================================================================
+# 唯一抓取目标: AgentDemo 主应用
+# 端点 /actuator/prometheus 由 B1 批次的 spring-boot-starter-actuator 提供
+# 在 B1 完成前抓取会失败, 这是预期的 — Prometheus UI Targets 页面会显示 DOWN
+scrape_configs:
+  - job_name: 'agent-demo'
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: ['localhost:9999']
+        labels:
+          application: 'agent-demo-main'
+          # B2 起会用 application 这个 label 在 Grafana 做筛选
+
+  # Prometheus 自监控 (默认实践: 一个 Prometheus 应该监控自己)
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

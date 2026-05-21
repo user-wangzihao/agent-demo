@@ -1,0 +1,24 @@
+# =============================================================================
+# Grafana 数据源自动挂载配置
+# =============================================================================
+# 用途: Grafana 启动时自动注册 Prometheus 数据源, 免去网页手点 Add Data Source.
+#
+# 加载机制: Grafana 启动时扫描 provisioning/datasources/*.yml,
+#   把里面定义的数据源同步到 SQLite (Grafana 元数据库).
+#
+# 部署: Grafana 默认从安装目录的 conf/provisioning/datasources/ 读取.
+#   README.md 会指导把本文件软链 (或复制) 过去.
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus                  # 数据源在 Grafana UI 显示的名字
+    type: prometheus
+    access: proxy                     # proxy = Grafana 后端转发请求 (推荐, 避免浏览器 CORS)
+    url: http://localhost:9090        # Prometheus 服务地址 (同机部署)
+    isDefault: true                   # 设为默认, 新建图表会自动选这个数据源
+    editable: true                    # 允许在 UI 里改 (调试方便)
+    jsonData:
+      timeInterval: '15s'             # 和 prometheus.yml 的 scrape_interval 对齐
+      httpMethod: 'POST'              # 复杂 PromQL 用 POST 避免 URL 超长
