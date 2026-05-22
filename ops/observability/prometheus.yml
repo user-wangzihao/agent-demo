@@ -34,8 +34,6 @@ scrape_configs:
     metrics_path: '/actuator/prometheus'
     static_configs:
       - targets: ['localhost:9999']
-        labels:
-          application: 'agent-demo-main'
           # B2 起会用 application 这个 label 在 Grafana 做筛选
 
   # Prometheus 自监控 (默认实践: 一个 Prometheus 应该监控自己)
