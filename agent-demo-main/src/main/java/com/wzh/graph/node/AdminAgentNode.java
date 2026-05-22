@@ -2,8 +2,11 @@ package com.wzh.graph.node;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.wzh.agentdemo.common.entity.ChatMessage;
+import com.wzh.enums.Intent;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.ChatClientInvoker;
+import com.wzh.graph.support.GraphMetricsCollector;
+import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.TokenSinkRegistry;
 import com.wzh.graph.support.TokenStreamSink;
 import lombok.RequiredArgsConstructor;
@@ -79,6 +82,9 @@ public class AdminAgentNode extends AbstractGraphNode {
     @Qualifier("adminChatClient")
     private final ChatClient adminChatClient;
 
+    /** B2: token 埋点采集器, 由 ChatClientInvoker 接收 */
+    private final GraphMetricsCollector metricsCollector;
+
     @Override
     protected String nodeId() {
         return NODE_ID;
@@ -120,8 +126,11 @@ public class AdminAgentNode extends AbstractGraphNode {
 
         Map<String, Object> toolContext = buildToolContext(state);
 
+        // B2: 取 intent 喂给 invoke. admin_command 流量进来 intent 是 ADMIN_COMMAND, 走 RouteUtil 解码兜底.
+        Intent intent = RouteUtil.safeIntent(state);
+
         String answer = ChatClientInvoker.invoke(adminChatClient, new Prompt(messages),
-                toolContext, sink);
+                toolContext, sink, intent, metricsCollector);
 
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.FINAL_ANSWER, answer);

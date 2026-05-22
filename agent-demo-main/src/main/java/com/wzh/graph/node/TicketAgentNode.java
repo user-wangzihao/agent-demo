@@ -4,8 +4,10 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wzh.agentdemo.common.entity.ChatMessage;
+import com.wzh.enums.Intent;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.ChatClientInvoker;
+import com.wzh.graph.support.GraphMetricsCollector;
 import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.TokenSinkRegistry;
 import com.wzh.graph.support.TokenStreamSink;
@@ -73,6 +75,9 @@ public class TicketAgentNode extends AbstractGraphNode {
     private final ChatClient ticketChatClient;
     private final ObjectMapper objectMapper;
 
+    /** B2: token 埋点采集器, 由 ChatClientInvoker 接收 */
+    private final GraphMetricsCollector metricsCollector;
+
     @Override
     protected String nodeId() {
         return NODE_ID;
@@ -97,8 +102,11 @@ public class TicketAgentNode extends AbstractGraphNode {
 
         Map<String, Object> toolContext = buildToolContext(state);
 
+        // B2: 取 intent 喂给 invoke 做 token 标签 (ticket 流量进来时 intent 通常是 default/troubleshoot)
+        Intent intent = RouteUtil.safeIntent(state);
+
         String answer = ChatClientInvoker.invoke(ticketChatClient, new Prompt(messages),
-                toolContext, sink);
+                toolContext, sink, intent, metricsCollector);
 
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.FINAL_ANSWER, answer);

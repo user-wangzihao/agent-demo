@@ -77,7 +77,8 @@ public class TestController {
                 prompt,
                 0.2f,
                 200,
-                null
+                null,
+                "test_chatonce"  // B2: 测试端点 scene 标签, 不复用业务常量, 便于 Grafana 过滤掉测试流量
         );
     }
 

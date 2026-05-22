@@ -1,8 +1,11 @@
 package com.wzh.graph.node;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
+import com.wzh.enums.Intent;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.ChatClientInvoker;
+import com.wzh.graph.support.GraphMetricsCollector;
+import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.TokenSinkRegistry;
 import com.wzh.graph.support.TokenStreamSink;
 import lombok.RequiredArgsConstructor;
@@ -53,6 +56,9 @@ public class ChitchatAnswerNode extends AbstractGraphNode {
     @Qualifier("chitchatChatClient")
     private final ChatClient chitchatChatClient;
 
+    /** B2: token 埋点采集器, 由 ChatClientInvoker 接收 */
+    private final GraphMetricsCollector metricsCollector;
+
     @Override
     protected String nodeId() {
         return NODE_ID;
@@ -76,8 +82,11 @@ public class ChitchatAnswerNode extends AbstractGraphNode {
         // toolContext 闲聊场景仍可传 (即使不会调用工具, 透传无副作用)
         Map<String, Object> toolContext = buildToolContext(state);
 
+        // B2: 取 intent 喂给 invoke. 闲聊节点理论上 intent 必然是 CHITCHAT, 但用 safeIntent 兜底防御.
+        Intent intent = RouteUtil.safeIntent(state);
+
         String answer = ChatClientInvoker.invoke(chitchatChatClient, new Prompt(messages),
-                toolContext, sink);
+                toolContext, sink, intent, metricsCollector);
 
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.FINAL_ANSWER, answer);

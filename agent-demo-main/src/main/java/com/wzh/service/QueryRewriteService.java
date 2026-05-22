@@ -3,6 +3,7 @@ package com.wzh.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wzh.config.RewriteProperties;
+import com.wzh.graph.support.GraphMetricsCollector;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -121,7 +122,8 @@ public class QueryRewriteService {
                     "原查询:" + query + "\n输出:",
                     rewriteProperties.getTemperature(),
                     rewriteProperties.getMaxTokens(),
-                    null
+                    null,
+                    GraphMetricsCollector.MetricScene.QUERY_REWRITE
             );
 
             // 2. 解析 JSON

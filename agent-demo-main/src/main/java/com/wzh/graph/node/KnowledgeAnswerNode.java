@@ -5,6 +5,7 @@ import com.wzh.agentdemo.common.entity.ChatMessage;
 import com.wzh.enums.Intent;
 import com.wzh.graph.core.GraphStateKeys;
 import com.wzh.graph.support.ChatClientInvoker;
+import com.wzh.graph.support.GraphMetricsCollector;
 import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.SystemPromptBuilder;
 import com.wzh.graph.support.TokenSinkRegistry;
@@ -50,6 +51,9 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
     @Qualifier("knowledgeChatClient")
     private final ChatClient knowledgeChatClient;
 
+    /** B2: token 埋点采集器, 由 ChatClientInvoker 接收 */
+    private final GraphMetricsCollector metricsCollector;
+
     @Override
     protected String nodeId() {
         return NODE_ID;
@@ -93,7 +97,7 @@ public class KnowledgeAnswerNode extends AbstractGraphNode {
 
         // 6. 调用 (双模式 by ChatClientInvoker)
         String answer = ChatClientInvoker.invoke(knowledgeChatClient, new Prompt(messages),
-                toolContext, sink);
+                toolContext, sink, intent, metricsCollector);
 
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.FINAL_ANSWER, answer);

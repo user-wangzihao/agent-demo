@@ -2,6 +2,7 @@ package com.wzh.service;
 
 import com.wzh.agentdemo.common.entity.FeatureDocument;
 import com.wzh.config.ProductionRetrieveProperties;
+import com.wzh.graph.support.GraphMetricsCollector;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -84,7 +85,8 @@ public class FeatureExtractService {
                     "用户:" + query + "\n输出:",
                     props.getTemperature(),
                     props.getMaxTokens(),
-                    null
+                    null,
+                    GraphMetricsCollector.MetricScene.FEATURE_EXTRACT
             );
 
             if (result == null) return null;

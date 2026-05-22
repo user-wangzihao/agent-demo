@@ -56,7 +56,7 @@ class LlmIntentClassifierTest {
         @Test
         @DisplayName("纯 JSON 输出 → 解析成功")
         void shouldParseCleanJson() {
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), eq("json_object")))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), eq("json_object"), any()))
                     .thenReturn("{\"intent\":\"how_to\",\"confidence\":0.92,\"reasoning\":\"询问操作\"}");
 
             IntentClassificationResult result = classifier.classify("怎么改色");
@@ -72,7 +72,7 @@ class LlmIntentClassifierTest {
         @DisplayName("Markdown 包裹的 JSON → 容错解析")
         void shouldStripMarkdownFence() {
             String llmOutput = "```json\n{\"intent\":\"chitchat\",\"confidence\":1.0,\"reasoning\":\"问候\"}\n```";
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenReturn(llmOutput);
 
             IntentClassificationResult result = classifier.classify("hi");
@@ -85,7 +85,7 @@ class LlmIntentClassifierTest {
             // unknown_intent 经 @JsonCreator 容错 → DEFAULT
             // 此时 result.intent == DEFAULT, parseAndValidate 中会被识别为"无效 intent"
             // 最终降级为 FALLBACK (而非保留为 LLM source)
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenReturn("{\"intent\":\"unknown_intent\",\"confidence\":0.9,\"reasoning\":\"x\"}");
 
             IntentClassificationResult result = classifier.classify("xx");
@@ -96,7 +96,7 @@ class LlmIntentClassifierTest {
         @Test
         @DisplayName("调用参数: 模型固定 qwen-turbo, fmt 固定 json_object")
         void shouldUseCorrectModelAndFormat() {
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenReturn("{\"intent\":\"how_to\",\"confidence\":0.9,\"reasoning\":\"x\"}");
 
             classifier.classify("怎么改色");
@@ -104,14 +104,17 @@ class LlmIntentClassifierTest {
             ArgumentCaptor<String> modelCaptor = ArgumentCaptor.forClass(String.class);
             ArgumentCaptor<String> fmtCaptor = ArgumentCaptor.forClass(String.class);
             ArgumentCaptor<String> sysCaptor = ArgumentCaptor.forClass(String.class);
+            ArgumentCaptor<String> sceneCaptor = ArgumentCaptor.forClass(String.class);
             verify(dashScopeService).chatOnce(
                     modelCaptor.capture(), sysCaptor.capture(), any(),
-                    anyFloat(), anyInt(), fmtCaptor.capture());
+                    anyFloat(), anyInt(), fmtCaptor.capture(), sceneCaptor.capture());
 
             assertThat(modelCaptor.getValue()).isEqualTo("qwen-turbo");
             assertThat(fmtCaptor.getValue()).isEqualTo("json_object");
             // System Prompt 必须包含 "JSON" 关键词 (DashScope JSON Mode 要求)
             assertThat(sysCaptor.getValue()).containsIgnoringCase("JSON");
+            // B2: 意图分类器必须传 intent_classify scene 常量
+            assertThat(sceneCaptor.getValue()).isEqualTo("intent_classify");
         }
     }
 
@@ -125,7 +128,7 @@ class LlmIntentClassifierTest {
         @DisplayName("置信度 < 阈值 → 降级 FALLBACK")
         void shouldFallbackOnLowConfidence() {
             // 阈值 0.6, 返回 0.5 → 应降级
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenReturn("{\"intent\":\"how_to\",\"confidence\":0.5,\"reasoning\":\"模糊\"}");
 
             IntentClassificationResult result = classifier.classify("xxx");
@@ -139,7 +142,7 @@ class LlmIntentClassifierTest {
         @DisplayName("置信度 = 阈值 → 不降级 (边界采纳)")
         void shouldKeepResultAtThresholdBoundary() {
             // 阈值 0.6, 返回 0.6 → 不应降级 (>= 阈值)
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenReturn("{\"intent\":\"how_to\",\"confidence\":0.6,\"reasoning\":\"边界\"}");
 
             IntentClassificationResult result = classifier.classify("xxx");
@@ -158,7 +161,7 @@ class LlmIntentClassifierTest {
         @Test
         @DisplayName("DashScope 抛 RuntimeException → 降级 FALLBACK")
         void shouldFallbackOnApiException() {
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenThrow(new RuntimeException("API 调用失败"));
 
             IntentClassificationResult result = classifier.classify("xxx");
@@ -171,7 +174,7 @@ class LlmIntentClassifierTest {
         @Test
         @DisplayName("LLM 返回非 JSON → 降级 FALLBACK")
         void shouldFallbackOnInvalidJson() {
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenReturn("我无法分类这个查询");
 
             IntentClassificationResult result = classifier.classify("xxx");
@@ -184,7 +187,7 @@ class LlmIntentClassifierTest {
         @Test
         @DisplayName("LLM 返回空字符串 → 降级 FALLBACK")
         void shouldFallbackOnEmptyResponse() {
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenReturn("");
 
             IntentClassificationResult result = classifier.classify("xxx");
@@ -196,7 +199,7 @@ class LlmIntentClassifierTest {
         @Test
         @DisplayName("LLM 返回缺失 intent 字段的 JSON → 降级 FALLBACK")
         void shouldFallbackOnMissingIntentField() {
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenReturn("{\"confidence\":0.9,\"reasoning\":\"忘了说 intent\"}");
 
             IntentClassificationResult result = classifier.classify("xxx");
@@ -219,7 +222,7 @@ class LlmIntentClassifierTest {
             // 把超时设得很短 (50ms), mock 故意 sleep 500ms
             config.getClassifier().setLlmTimeoutMs(50);
 
-            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any()))
+            when(dashScopeService.chatOnce(any(), any(), any(), anyFloat(), anyInt(), any(), any()))
                     .thenAnswer(invocation -> {
                         Thread.sleep(500);
                         return "{\"intent\":\"how_to\",\"confidence\":0.9,\"reasoning\":\"x\"}";

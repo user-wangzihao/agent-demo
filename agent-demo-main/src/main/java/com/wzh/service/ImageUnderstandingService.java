@@ -6,6 +6,7 @@ import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationR
 import com.alibaba.dashscope.common.MultiModalMessage;
 import com.alibaba.dashscope.common.Role;
 import com.wzh.config.DashScopeConfig;
+import com.wzh.graph.support.GraphMetricsCollector;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -19,6 +20,9 @@ import java.util.*;
  * 两种使用场景：
  * 1. 文档学习场景：analyzeImages / analyzeImage — 将文档截图转为可检索的文本知识
  * 2. 用户对话场景：analyzeUserScreenshot — 理解用户上传的截图，提取错误信息和界面状态
+ *
+ * <p><b>B2 token 埋点</b>: 两个对外方法在 result 拿到后都喂给 metricsCollector,
+ * scene 分别为 IMAGE_DOC_LEARN (文档学习) / IMAGE_USER_SCREENSHOT (用户截图).</p>
  */
 @Slf4j
 @Service
@@ -26,6 +30,8 @@ import java.util.*;
 public class ImageUnderstandingService {
 
     private final DashScopeConfig dashScopeConfig;
+    /** B2: token 埋点采集器, 在 VL 模型调用末尾发射. */
+    private final GraphMetricsCollector metricsCollector;
 
     // ==================== 文档学习场景 ====================
 
@@ -62,6 +68,10 @@ public class ImageUnderstandingService {
 
             String description = result.getOutput().getChoices().get(0)
                     .getMessage().getContent().get(0).get("text").toString();
+
+            // B2: token 埋点 (scene = image_doc_learn, 文档学习场景)
+            recordVlTokens(result, dashScopeConfig.getVisionModel(),
+                    GraphMetricsCollector.MetricScene.IMAGE_DOC_LEARN);
 
             log.info("图片分析完成 [{}] - {}, 描述长度: {} 字符",
                     featureName, imageUrl.substring(imageUrl.lastIndexOf('/') + 1),
@@ -144,6 +154,10 @@ public class ImageUnderstandingService {
 
             String description = result.getOutput().getChoices().get(0)
                     .getMessage().getContent().get(0).get("text").toString();
+
+            // B2: token 埋点 (scene = image_user_screenshot, 用户对话截图场景)
+            recordVlTokens(result, dashScopeConfig.getVisionModel(),
+                    GraphMetricsCollector.MetricScene.IMAGE_USER_SCREENSHOT);
 
             log.info("用户截图分析完成，描述长度: {} 字符", description.length());
             return description;
@@ -229,5 +243,56 @@ public class ImageUnderstandingService {
                 请用简洁准确的中文描述，重点突出与用户问题相关的信息。
                 不要使用"这张图片展示了"之类的开头，直接描述内容。
                 """;
+    }
+
+    // ==================== B2 token 埋点 ====================
+
+    /**
+     * 从 MultiModalConversationResult 提 Usage 喂给 metricsCollector.
+     *
+     * <p><b>DashScope VL 模型的 Usage 字段</b>: inputTokens / outputTokens / imageTokens.
+     * 我们只采 inputTokens + outputTokens 进 prompt/completion 计数,
+     * imageTokens (图像 token, 与文本 token 同口径) 算入 prompt 端 — 这是行业惯例.</p>
+     *
+     * <p><b>B2 hotfix: completion 减法兜底</b>: 与 DashScopeService 同思路 —
+     * 当 outputTokens=0 且 totalTokens > 输入侧 token 总和时, 用减法兜底.</p>
+     *
+     * <p><b>null 安全</b>: 任何环节 null 直接 return, 不抛出. 多模态调用本身已经在外层 try-catch 内,
+     * 这里再加一层防御性返回, 确保埋点失败绝不影响业务返回值.</p>
+     */
+    private void recordVlTokens(MultiModalConversationResult result, String model, String scene) {
+        if (metricsCollector == null || result == null || result.getUsage() == null) return;
+        try {
+            Object usage = result.getUsage();
+            // 反射兼容: DashScope SDK VL 的 Usage 内嵌类字段名是 inputTokens/outputTokens/imageTokens,
+            // getter 形如 getInputTokens(). 用反射兜底防 SDK 版本飘.
+            long inputTokens = invokeIntGetterOrZero(usage, "getInputTokens");
+            long outputTokens = invokeIntGetterOrZero(usage, "getOutputTokens");
+            long imageTokens = invokeIntGetterOrZero(usage, "getImageTokens");
+            long totalTokens = invokeIntGetterOrZero(usage, "getTotalTokens");
+            // 图像 token 计入 prompt 侧 (用户输入消耗)
+            long promptTokens = inputTokens + imageTokens;
+            // 减法兜底: VL 模型某些场景下 outputTokens 也可能为 0
+            if (outputTokens == 0 && totalTokens > promptTokens) {
+                outputTokens = totalTokens - promptTokens;
+            }
+            metricsCollector.recordLlmTokens(model, scene, "n/a", promptTokens, outputTokens);
+        } catch (Exception e) {
+            log.warn("[VL] token 埋点失败 model={} scene={}", model, scene, e);
+        }
+    }
+
+    /**
+     * 反射调用形如 getXxxTokens() 的方法, 返回 long; 失败/null/非数值都返回 0.
+     */
+    private static long invokeIntGetterOrZero(Object target, String methodName) {
+        try {
+            Object value = target.getClass().getMethod(methodName).invoke(target);
+            if (value instanceof Integer i) return i.longValue();
+            if (value instanceof Long l) return l;
+            return 0L;
+        } catch (Exception ignored) {
+            return 0L;
+        }
     }
 }

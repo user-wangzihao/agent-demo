@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.wzh.config.IntentKeywordsConfig;
 import com.wzh.enums.Intent;
+import com.wzh.graph.support.GraphMetricsCollector;
 import com.wzh.model.intent.IntentClassificationResult;
 import com.wzh.service.DashScopeService;
 import com.wzh.service.intent.IntentClassifier;
@@ -141,7 +142,8 @@ public class LlmIntentClassifier implements IntentClassifier {
             String json = CompletableFuture
                     .supplyAsync(() -> dashScopeService.chatOnce(
                             MODEL, SYSTEM_PROMPT, "用户查询: " + query + "\nJSON 输出:",
-                            TEMPERATURE, MAX_TOKENS, "json_object"))
+                            TEMPERATURE, MAX_TOKENS, "json_object",
+                            GraphMetricsCollector.MetricScene.INTENT_CLASSIFY))
                     .orTimeout(timeoutMs, TimeUnit.MILLISECONDS)
                     .join();
 
