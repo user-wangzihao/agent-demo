@@ -42,6 +42,7 @@ public class DashboardService {
 
     private final DashboardMapper dashboardMapper;
     private final PrometheusQueryClient prometheus;
+    private final TicketStatsClient ticketStatsClient;
 
     /**
      * 取一次 KPI 快照 (5 卡数据).
@@ -93,8 +94,8 @@ public class DashboardService {
                 dashboardMapper.countFaqCandidateInRange(yesterday, today), "yesterdayCandidate");
         builder.faqCandidateDeltaVsYesterday(todayCandidate - yesterdayCandidate);
 
-        builder.todayTicketCount(safeLong(() ->
-                dashboardMapper.countTicketsInRange(today, tomorrow), "todayTickets"));
+        builder.todayTicketCount(safeLong(
+                ticketStatsClient::getTodayCount, "todayTickets"));
 
         long mysqlMs = System.currentTimeMillis() - mysqlStart;
         debug.put("mysql", mysqlMs);
@@ -108,11 +109,9 @@ public class DashboardService {
         // 它的执行时刻 ≈ 整轮对话结束时刻 (finalize 自身只跑约 1-10ms).
         // 用 5m 窗口的 rate 算分位数, 大屏看的是"近期稳定状态" 不是某一次的极值.
         builder.graphLatencyP50Ms(promToMillis(prometheus.queryScalar(
-                "histogram_quantile(0.50, sum by(le) " +
-                "(rate(agent_graph_node_latency_seconds_bucket{node_name=\"finalize\"}[5m])))")));
+                "histogram_quantile(0.50, sum by (le) (increase(agent_graph_node_latency_seconds_bucket{node_name=\"knowledge_answer\"}[24h])))")));
         builder.graphLatencyP95Ms(promToMillis(prometheus.queryScalar(
-                "histogram_quantile(0.95, sum by(le) " +
-                "(rate(agent_graph_node_latency_seconds_bucket{node_name=\"finalize\"}[5m])))")));
+                "histogram_quantile(0.95, sum by (le) (increase(agent_graph_node_latency_seconds_bucket{node_name=\"knowledge_answer\"}[24h])))")));
 
         // 卡 4: 今日 Token 总量 + 占比最高的 scene
         // increase(...[24h]) 算 24 小时增量, sum 后只剩一个标量.
@@ -122,7 +121,7 @@ public class DashboardService {
 
         // 按 scene 聚合, 找占比最高的 scene
         Map<String, Double> byScene = prometheus.queryGrouped(
-                "sum by(scene) (increase(agent_llm_tokens_total{token_type=\"total\"}[24h]))",
+                "sum by (scene) (increase(agent_llm_tokens_total{token_type=\"total\"}[24h]))",
                 "scene");
         String topScene = "unknown";
         double topScenePercent = 0.0;

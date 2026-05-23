@@ -9,7 +9,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
-import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -158,13 +157,15 @@ public class PrometheusQueryClient {
         if (promql == null || promql.isBlank()) return null;
         long start = System.currentTimeMillis();
         try {
-            String url = UriComponentsBuilder.fromHttpUrl(baseUrl)
-                    .path("/api/v1/query")
-                    .queryParam("query", promql)
-                    .build()
-                    .encode()
-                    .toUriString();
-            String body = restTemplate.getForObject(url, String.class);
+            // URLEncoder 编码后构造 URI 对象传给 RestTemplate
+            // 必须用 URI 对象而非字符串——RestTemplate 遇到字符串会再编码一次，
+            // 导致 % → %25，Prometheus 收到乱码无法解析
+            String encodedQuery = java.net.URLEncoder.encode(
+                    promql, java.nio.charset.StandardCharsets.UTF_8);
+            java.net.URI uri = java.net.URI.create(
+                    baseUrl + "/api/v1/query?query=" + encodedQuery);
+
+            String body = restTemplate.getForObject(uri, String.class);
             long latency = System.currentTimeMillis() - start;
             log.debug("[PROM-QUERY] {}ms promql={}", latency, promql);
 
@@ -178,7 +179,6 @@ public class PrometheusQueryClient {
             return root;
         } catch (Exception e) {
             long latency = System.currentTimeMillis() - start;
-            // warn 级别 — 单次失败不要刷屏 error
             log.warn("[PROM-QUERY] failed {}ms promql={} err={}",
                     latency, promql, e.getMessage());
             return null;

@@ -45,7 +45,7 @@ public interface DashboardMapper {
               AND create_time < #{dayEnd}
             """)
     long countUserMessagesInRange(@Param("dayStart") LocalDate dayStart,
-                                   @Param("dayEnd") LocalDate dayEnd);
+                                  @Param("dayEnd") LocalDate dayEnd);
 
     /**
      * 某一天活跃过的用户数 (有任意 user 消息).
@@ -60,7 +60,7 @@ public interface DashboardMapper {
               AND m.create_time < #{dayEnd}
             """)
     long countActiveUsersInRange(@Param("dayStart") LocalDate dayStart,
-                                  @Param("dayEnd") LocalDate dayEnd);
+                                 @Param("dayEnd") LocalDate dayEnd);
 
     // ==================== 卡 3: FAQ 命中率 ====================
 
@@ -83,7 +83,7 @@ public interface DashboardMapper {
               AND create_time < #{dayEnd}
             """)
     long countFaqHitInRange(@Param("dayStart") LocalDate dayStart,
-                             @Param("dayEnd") LocalDate dayEnd);
+                            @Param("dayEnd") LocalDate dayEnd);
 
     // ==================== 卡 5: 数据飞轮 + 工单 ====================
 
@@ -91,7 +91,7 @@ public interface DashboardMapper {
      * faq_candidate 表当前 status='pending' 的总条数 (跨时间).
      * 这是"当前待办量", 不限时间范围.
      */
-    @Select("SELECT COUNT(*) FROM faq_candidate WHERE status = 'pending'")
+    @Select("SELECT COUNT(*) FROM faq_candidate WHERE review_status = 'PENDING'")
     long countFaqCandidatePending();
 
     /**
@@ -104,28 +104,8 @@ public interface DashboardMapper {
               AND create_time < #{dayEnd}
             """)
     long countFaqCandidateInRange(@Param("dayStart") LocalDate dayStart,
-                                   @Param("dayEnd") LocalDate dayEnd);
+                                  @Param("dayEnd") LocalDate dayEnd);
 
-    /**
-     * 某一天 ticket_system 创建的工单数. 工单表在 TicketSystem 子项目里, 通过
-     * AgentDemo 数据库的 ticket_local_cache 或反查 TicketSystem 接口拿都行 —
-     * 当前实现假设 AgentDemo 直接 join 同库的 ticket 影子表. 若没有, Service 层
-     * 走 HTTP 调 TicketSystem 拿数也可, 这里先留 SQL 接口.
-     *
-     * <p><b>实际表名</b>: 项目里 TicketSystem 的工单存在 ticket_system 库的 t_ticket 表,
-     * 我们假设 AgentDemo 配的数据源也能访问这张表 (通过 DB user 跨库授权或视图),
-     * 或者数据已被同步到 AgentDemo 主库的 t_ticket. 若都不通, B4 这里返回 0
-     * (Service 层兜底), 不阻塞主路径.</p>
-     *
-     * <p>SQL 中表名暂用 {@code t_ticket}, 你确认实际表名后改这一处即可.</p>
-     */
-    @Select("""
-            SELECT COUNT(*) FROM t_ticket
-            WHERE create_time >= #{dayStart}
-              AND create_time < #{dayEnd}
-            """)
-    long countTicketsInRange(@Param("dayStart") LocalDate dayStart,
-                              @Param("dayEnd") LocalDate dayEnd);
 
     // ==================== 滚动时间线 ====================
 
@@ -150,7 +130,14 @@ public interface DashboardMapper {
                 SUBSTRING(m.content, 1, 60) AS questionSummary,
                 'default' AS intentCode,
                 m.feature_name AS matchedFeature,
-                COALESCE(m.faq_hit, FALSE) AS faqHit,
+                COALESCE(
+                        (SELECT m2.faq_hit FROM chat_message m2
+                         WHERE m2.session_id = m.session_id
+                           AND m2.role = 'assistant'
+                           AND m2.create_time > m.create_time
+                         ORDER BY m2.create_time ASC LIMIT 1),
+                        FALSE
+                    ) AS faqHit,
                 COALESCE(
                     TIMESTAMPDIFF(MICROSECOND, m.create_time,
                         (SELECT m2.create_time FROM chat_message m2
