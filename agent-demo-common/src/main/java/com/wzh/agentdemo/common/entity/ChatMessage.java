@@ -53,4 +53,20 @@ public class ChatMessage {
     @TableField("faq_hit")
     private Boolean faqHit;
 
+    /**
+     * B6 (第3刀语义缓存): 命中的语义缓存 cache_key.
+     * <ul>
+     *   <li>assistant 行: L1/L2 命中时写入对应 cacheKey, 未命中为 NULL</li>
+     *   <li>user 行: 恒为 NULL, 不维护</li>
+     * </ul>
+     *
+     * <p>用途:</p>
+     * <ol>
+     *   <li>负反馈三入口 (点踩 / 重新生成 / 提交工单) 反查对应缓存累加 feedback_score</li>
+     *   <li>事后归因分析: 缓存命中的回答最终是否被用户接受</li>
+     * </ol>
+     */
+    @TableField("cache_key")
+    private String cacheKey;
+
 }

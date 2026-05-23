@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.wzh.agentdemo.common.mapper.SemanticCacheMapper">
+
+    <!-- 原子累加 hit_count + 更新 last_hit_time -->
+    <update id="incrementHitCount">
+        UPDATE semantic_cache
+        SET hit_count    = hit_count + 1,
+        last_hit_time = #{now}
+        WHERE cache_key = #{cacheKey}
+    </update>
+
+    <!-- 原子累加 feedback_score -->
+    <update id="incrementFeedbackScore">
+        UPDATE semantic_cache
+        SET feedback_score = feedback_score + #{delta}
+        WHERE cache_key = #{cacheKey}
+    </update>
+
+    <!-- 按 featureName 批量置 INVALID -->
+    <update id="invalidateByFeatureName">
+        UPDATE semantic_cache
+        SET status = 'INVALID'
+        WHERE feature_name = #{featureName}
+        AND status &lt;&gt; 'INVALID'
+    </update>
+
+</mapper>

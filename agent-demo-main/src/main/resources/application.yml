@@ -339,3 +339,13 @@ prometheus:
   connect-timeout-ms: 1000
   # 读取超时, Grafana 默认 1.5s, 平衡用户体验与兜底
   read-timeout-ms: 1500
+
+semantic-cache:
+  enabled: true
+  similarity-threshold: 0.92        # L2 语义命中余弦相似度阈值
+  ttl-hours: 24                      # Redis TTL + MySQL expire_at
+  feedback-threshold: 5              # feedback_score 达此分置 DEGRADED
+  feedback-weight-dislike: 2         # 用户点踩权重
+  feedback-weight-regenerate: 1      # 重新生成权重
+  feedback-weight-ticket: 3          # 提交工单权重
+  milvus-collection: semantic_cache_vectors
