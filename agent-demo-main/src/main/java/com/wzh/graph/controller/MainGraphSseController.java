@@ -342,6 +342,16 @@ public class MainGraphSseController {
                     relatedImages == null ? Collections.emptyList() : relatedImages));
             msg.setSources(objectMapper.writeValueAsString(
                     sources == null ? Collections.emptyList() : sources));
+
+            // B4: 计算 faq_hit — sources 列表中至少有一条 chunkType == "FAQ" 即视为命中.
+            // 定义依据: merger 节点处理后的 sources 是真实展示给用户的来源, 这里出现 FAQ
+            // 就证明 FAQ 答案被采纳入最终回答 (语义最准确, 比单纯检索召回严格).
+            // SourceInfo.chunkType 在 RetrievalPostProcessor.toFaqSourceInfoList 中硬编码为 "FAQ",
+            // 与 doc sources 的 chunkType (从 SearchResult 透传) 区分.
+            boolean faqHit = sources != null && sources.stream()
+                    .anyMatch(s -> "FAQ".equals(s.chunkType));
+            msg.setFaqHit(faqHit);
+
             chatMessageMapper.insert(msg);
             // MyBatis-Plus 默认自增主键回填: msg.getId() 现在已是 DB 主键
 

@@ -57,8 +57,11 @@ public class AuthInterceptor implements HandlerInterceptor {
         UserContext.clear();
     }
 
-    private boolean isAdminOnly(String uri) {
-        return uri.startsWith("/api/document") || uri.startsWith("/api/file") || uri.startsWith("/api/agent/learn");
+    public boolean isAdminOnly(String uri) {
+        return uri.startsWith("/api/document")
+                || uri.startsWith("/api/file")
+                || uri.startsWith("/api/agent/learn")
+                || uri.startsWith("/api/admin");  // B4: /api/admin/** 全锁 admin (含 dashboard)
     }
 
     private void writeError(HttpServletResponse response, int code, String message) throws Exception {

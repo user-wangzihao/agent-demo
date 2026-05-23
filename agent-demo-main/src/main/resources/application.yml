@@ -326,3 +326,16 @@ faq:
     top-k: 3
     # 通用 FAQ 的 feature_name 标识 (沿用 AgentService.learnFaq 既定约定)
     general-marker: "通用FAQ"
+
+# ============ Prometheus 查询客户端 (B4 引入) ============
+# 大屏 KPI 卡 #2 (Graph 耗时) 和 #4 (今日 Token) 通过 PrometheusQueryClient
+# HTTP 调 Prometheus query API 取数. 与 Grafana 共用同一个 Prometheus 实例,
+# 保证两套 UI 看到的数据一致.
+prometheus:
+  # Prometheus 服务地址. 本地开发部署形态默认 localhost:9090.
+  # 生产部署改为内网 service DNS, 如 http://prometheus.observability.svc:9090
+  base-url: http://localhost:9090
+  # 连接超时, 同机访问 1s 足够
+  connect-timeout-ms: 1000
+  # 读取超时, Grafana 默认 1.5s, 平衡用户体验与兜底
+  read-timeout-ms: 1500
