@@ -40,6 +40,17 @@ public class FeatureResolveNode extends AbstractGraphNode {
 
     @Override
     protected Map<String, Object> doApply(OverAllState state) {
+        // B3-a: 检测 state.MATCHED_FEATURE 是否已被 CacheCheckNode 写入. 已有值则跳过, 避免重复调用.
+        String existing = state.value(GraphStateKeys.MATCHED_FEATURE, String.class).orElse(null);
+        if (existing != null && !existing.isBlank()) {
+            Map<String, Object> partial = new HashMap<>();
+            log.info("[{}] MATCHED_FEATURE already set to '{}' by upstream, skip resolveFeature",
+                    NODE_ID, existing);
+            appendPhaseLog(state, partial,
+                    "[" + NODE_ID + "] reused upstream matched=" + existing);
+            return partial;
+        }
+
         // 用 enhancedMessage (图片描述拼接后的) 做 feature 解析, 和 AgentService 行为一致
         String enhancedMessage = state.value(GraphStateKeys.ENHANCED_MESSAGE, String.class).orElse("");
         String selectedFeatureName = state.value(GraphStateKeys.SELECTED_FEATURE_NAME, String.class).orElse(null);
@@ -48,8 +59,6 @@ public class FeatureResolveNode extends AbstractGraphNode {
 
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.MATCHED_FEATURE, matched);
-
-        // 第六刀 Batch 2 hotfix v5: 节点端写 holder 已废弃, 同 IntentNode 注释.
 
         log.info("[{}] selected='{}' → matched={}", NODE_ID, selectedFeatureName, matched);
         appendPhaseLog(state, partial,

@@ -6,6 +6,7 @@ import com.wzh.agentdemo.common.entity.SemanticCache;
 import com.wzh.agentdemo.common.mapper.SemanticCacheMapper;
 import com.wzh.common.CacheEntry;
 import com.wzh.config.SemanticCacheProperties;
+import com.wzh.enums.Intent;
 import com.wzh.graph.support.SourceInfo;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -74,13 +75,13 @@ public class SemanticCacheService {
      *
      * @return 永不返回 null. 未命中时 hit=false.
      */
-    public CacheLookupResult lookup(String query, String featureName) {
+    public CacheLookupResult lookup(String query, String featureName, Intent intent) {
         if (!properties.isEnabled() || query == null || query.isBlank() || featureName == null) {
             return CacheLookupResult.miss();
         }
 
         // L1 精确命中
-        String l1Key = computeCacheKey(featureName, query);
+        String l1Key = computeCacheKey(featureName, intent, query);
         CacheEntry l1Entry = readRedis(l1Key);
         if (l1Entry != null && validateStatus(l1Key)) {
             incrementHitAsync(l1Key);
@@ -108,36 +109,72 @@ public class SemanticCacheService {
     /**
      * 写入缓存. 顺序 MySQL → Redis → Milvus, 任意失败仅 warn.
      *
-     * @return 写入的 cacheKey (即使部分失败也返回 key, 调用方据此写 chat_message.cache_key)
+     * <p><b>upsert 策略</b>: 同 cacheKey 已存在的情况:
+     * <ul>
+     *   <li>status=ACTIVE: 理论上不应发生 (说明上游没正确做 lookup), 仅 warn, 不重复写</li>
+     *   <li>status=DEGRADED/INVALID: UPDATE 复活 — status=ACTIVE, answer_text=新答案,
+     *       feedback_score=0, hit_count=0, expire_at=新过期; Redis/Milvus 重建. 这是 DEGRADED 后
+     *       重新生成的合法链路.</li>
+     * </ul></p>
+     *
+     * @return 写入的 cacheKey (即使部分失败也返回, 调用方据此写 chat_message.cache_key)
      */
-    public String put(String query, String featureName, String answerText, List<SourceInfo> sources) {
+    public String put(String query, String featureName, Intent intent,
+                      String answerText, List<SourceInfo> sources, List<String> relatedImages) {
         if (!properties.isEnabled()) return null;
         if (query == null || query.isBlank() || featureName == null || answerText == null) return null;
 
-        String cacheKey = computeCacheKey(featureName, query);
+        String cacheKey = computeCacheKey(featureName, intent, query);
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime expireAt = now.plusHours(properties.getTtlHours());
 
-        // Step 1: MySQL
-        SemanticCache row = new SemanticCache();
-        row.setCacheKey(cacheKey);
-        row.setFeatureName(featureName);
-        row.setQueryText(query);
-        row.setAnswerText(answerText);
-        row.setSourceInfo(sources == null ? null : safeToJson(sources));
-        row.setStatus(CacheStatus.ACTIVE);
-        row.setHitCount(0);
-        row.setFeedbackScore(0);
-        row.setExpireAt(expireAt);
+        // Step 1: MySQL upsert
         try {
-            semanticCacheMapper.insert(row);
+            SemanticCache existing = semanticCacheMapper.selectOne(
+                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<SemanticCache>()
+                            .eq(SemanticCache::getCacheKey, cacheKey));
+            if (existing == null) {
+                // INSERT
+                SemanticCache row = new SemanticCache();
+                row.setCacheKey(cacheKey);
+                row.setFeatureName(featureName);
+                row.setQueryText(query);
+                row.setAnswerText(answerText);
+                row.setSourceInfo(sources == null ? null : safeToJson(sources));
+                row.setStatus(CacheStatus.ACTIVE);
+                row.setHitCount(0);
+                row.setFeedbackScore(0);
+                row.setExpireAt(expireAt);
+                semanticCacheMapper.insert(row);
+            } else if (CacheStatus.ACTIVE.equals(existing.getStatus())) {
+                // 已有 ACTIVE 记录: 说明 lookup 应已命中, 不应重复 put. 仅 warn 并跳过.
+                log.warn("[SemanticCache] put on existing ACTIVE record, skip cacheKey={}", cacheKey);
+                return cacheKey;
+            } else {
+                // DEGRADED / INVALID: 复活
+                SemanticCache update = new SemanticCache();
+                update.setCacheKey(cacheKey);   // 仅供 wrapper 定位
+                update.setFeatureName(featureName);
+                update.setQueryText(query);
+                update.setAnswerText(answerText);
+                update.setSourceInfo(sources == null ? null : safeToJson(sources));
+                update.setStatus(CacheStatus.ACTIVE);
+                update.setHitCount(0);
+                update.setFeedbackScore(0);
+                update.setExpireAt(expireAt);
+                semanticCacheMapper.update(update,
+                        new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<SemanticCache>()
+                                .eq(SemanticCache::getCacheKey, cacheKey));
+                log.info("[SemanticCache] revived cacheKey={} (was status={})", cacheKey, existing.getStatus());
+            }
         } catch (Exception e) {
-            log.warn("[SemanticCache] MySQL insert failed cacheKey={}, skip Redis/Milvus", cacheKey, e);
+            log.warn("[SemanticCache] MySQL upsert failed cacheKey={}, skip Redis/Milvus", cacheKey, e);
             return null;
         }
 
         // Step 2: Redis
         CacheEntry entry = new CacheEntry(cacheKey, featureName, answerText, sources,
+                relatedImages == null ? java.util.Collections.emptyList() : relatedImages,
                 System.currentTimeMillis());
         try {
             String json = objectMapper.writeValueAsString(entry);
@@ -147,8 +184,9 @@ public class SemanticCacheService {
             log.warn("[SemanticCache] Redis set failed cacheKey={}, continue to Milvus", cacheKey, e);
         }
 
-        // Step 3: Milvus
+        // Step 3: Milvus (复活场景下也要先删旧的向量, 避免主键冲突)
         try {
+            milvusService.deleteByCacheKey(cacheKey);   // 幂等; 不存在也不报错
             List<Float> embedding = dashScopeService.getEmbedding(query);
             long expireAtMs = expireAt.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
             milvusService.insert(cacheKey, featureName, embedding, expireAtMs);
@@ -271,10 +309,19 @@ public class SemanticCacheService {
 
     // ==================== Key 生成 + 归一化 ====================
 
-    /** 暴露给外部 (FinalizeNode 写 chat_message.cache_key 前先算一次). */
-    public String computeCacheKey(String featureName, String query) {
+    /**
+     * 暴露给外部 (FinalizeNode / Controller 写 chat_message.cache_key 前先算一次).
+     *
+     * <p>cacheKey = MD5(featureName + "|" + intent.code + "|" + normalize(query)).
+     * 加 Intent 维度避免不同意图 (how_to / troubleshoot / feature_intro) 下相同 query
+     * 的回答风格差异被同一缓存覆盖.</p>
+     */
+    public String computeCacheKey(String featureName, Intent intent, String query) {
         String normalized = normalize(query);
-        String raw = (featureName == null ? "" : featureName) + "|" + normalized;
+        String intentCode = intent == null ? "default" : intent.getCode();
+        String raw = (featureName == null ? "" : featureName)
+                + "|" + intentCode
+                + "|" + normalized;
         return md5(raw);
     }
 

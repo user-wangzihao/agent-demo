@@ -99,6 +99,20 @@ public final class GraphStateKeys {
      */
     public static final String PHASE_LOG = "phaseLog";
 
+    // ==================== 语义缓存 (第3刀) ====================
+
+    /**
+     * 缓存命中标记 + 命中的 cacheKey.
+     * 非 null = L1/L2 命中, FinalizeNode 据此识别命中分支跳过 metrics 桥接的中间环节部分.
+     * CacheCheckNode 写, Controller doOnNext 捕获, handleDone 写入 chat_message.cache_key.
+     */
+    public static final String CACHE_HIT_KEY = "cacheHitKey";
+
+    /**
+     * 缓存命中层级 "L1"/"L2"; 用于埋点和日志, 命中时 Controller 写入 chat_message.cache_hit_layer.
+     */
+    public static final String CACHE_HIT_LAYER = "cacheHitLayer";
+
     private GraphStateKeys() {
         // 禁止实例化
     }

@@ -31,6 +31,9 @@ public class CacheEntry {
     /** 引用来源列表. SourceInfo 是顶层类 (第六刀 B3 产物), 直接序列化. */
     private List<SourceInfo> sources;
 
+    /** 相关图片 URL 列表 (B3-a: 单独缓存, 避免命中时无法从 sources 反推). */
+    private List<String> relatedImages;
+
     /** 写入时刻毫秒时间戳, 调试用. */
     private long createTimeMs;
 }

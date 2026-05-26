@@ -22,38 +22,39 @@ import static com.alibaba.cloud.ai.graph.action.AsyncEdgeAction.edge_async;
 import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
 
 /**
- * 主对话 Graph 的装配配置 (B5-b-1 升级版).
+ * 主对话 Graph 的装配配置 (第3刀 B3-a 升级版).
  *
- * <p><b>Graph 形状 (B5-b-1)</b>:
+ * <p><b>Graph 形状 (B3-a)</b>:
  * <pre>
  *   __START__
  *      → preprocess
- *      → intent ──(chitchat 短路)──→ chitchat_answer ──┐
- *           │                                          │
- *           ├──(admin_command + admin 短路)──→ admin_agent ──┤
- *           │                                          │
- *           ↓                                          │
- *      → feature_resolve ─┬→ doc_retrieve ─┐           │
- *                         └→ faq_retrieve ─┴→ merger   │
- *      → merger ──┬─(ticket)─────→ ticket_agent     ─┤
- *                 └─(default)────→ knowledge_answer ─┤
- *                                                    ↓
- *                                                 finalize → __END__
+ *      → intent ──(chitchat 短路)──→ chitchat_answer ────────────────┐
+ *           │                                                          │
+ *           ├──(admin_command + admin 短路)──→ admin_agent ────────────┤
+ *           │                                                          │
+ *           ↓ (业务意图)                                                │
+ *      → cache_check ──(命中)──→ finalize 短路                          │
+ *           │                                                          │
+ *           ↓ (未命中)                                                  │
+ *      → feature_resolve ─┬→ doc_retrieve ─┐                           │
+ *                         └→ faq_retrieve ─┴→ merger                   │
+ *      → merger ──┬─(ticket)─────→ ticket_agent ─────────────────────┤
+ *                 └─(default)────→ knowledge_answer ──────────────────┤
+ *                                                                      ↓
+ *                                                                   finalize → __END__
  * </pre></p>
  *
- * <p><b>变更点 vs 第四刀</b>:
+ * <p><b>变更点 vs B5-b-1 (第六刀)</b>:
  * <ul>
- *   <li>routeAfterIntent 从二分流升级为三分流 — admin_command 在 intent 阶段直接短路到
- *       admin_agent, 不走 RAG. 这把"管理员意图"从正则关键词后置判定 (做法 X) 升级为
- *       LLM/关键词分类一等公民 (做法 Y), 路由层只做映射不做判断.</li>
- *   <li>routeAfterMerger 简化为 ticket / knowledge 二选一, isAdminMetaQuery 路径已退役.</li>
- *   <li>所有 state 取值走 RouteUtil.safeIntent / safeString, 修复 Graph 1.1.2 把枚举
- *       序列化为 ArrayList 导致 state.value(K, Intent.class) 静默 fallback DEFAULT 的潜伏 bug.
- *       影响范围: chitchat 短路、IntentBoost 加权、SystemPrompt 风格模板, 此前全部未生效.</li>
+ *   <li>新增 cache_check 节点, 位置: intent 之后, feature_resolve 之前.</li>
+ *   <li>新增 conditionalEdge routeAfterCacheCheck: 命中 → finalize, 未命中 → feature_resolve.</li>
+ *   <li>chitchat / admin_command 短路保持不变, 这两类意图不进 cache_check
+ *       (不应被缓存: chitchat 答案多样化, admin_command 是写操作).</li>
+ *   <li>原 routeAfterIntent 的 "进 RAG" 出边从 feature_resolve 改为 cache_check.</li>
  * </ul></p>
  *
  * @author wzh
- * @since 2026-05-13 (第四刀); 2026-05-19 (B5-b-1 重构)
+ * @since 2026-05-25 (第3刀 B3-a)
  */
 @Slf4j
 @Configuration
@@ -62,9 +63,10 @@ public class MainGraphConfig {
 
     private static final String NODE_PREPROCESS = "preprocess";
     private static final String NODE_INTENT = "intent";
+    private static final String NODE_CACHE_CHECK = "cache_check";          // ★ 第3刀 B3-a 新增
     private static final String NODE_FEATURE_RESOLVE = "feature_resolve";
     private static final String NODE_DOC_RETRIEVE = "doc_retrieve";
-    private static final String NODE_FAQ_RETRIEVE = "faq_retrieve";       // ★ 第四刀新增
+    private static final String NODE_FAQ_RETRIEVE = "faq_retrieve";
     private static final String NODE_MERGER = "merger";
     private static final String NODE_CHITCHAT_ANSWER = "chitchat_answer";
     private static final String NODE_KNOWLEDGE_ANSWER = "knowledge_answer";
@@ -74,9 +76,10 @@ public class MainGraphConfig {
 
     private final PreprocessNode preprocessNode;
     private final IntentNode intentNode;
+    private final CacheCheckNode cacheCheckNode;                            // ★
     private final FeatureResolveNode featureResolveNode;
     private final DocRetrieveNode docRetrieveNode;
-    private final FaqRetrieveNode faqRetrieveNode;                        // ★ 第四刀新增
+    private final FaqRetrieveNode faqRetrieveNode;
     private final MergerNode mergerNode;
     private final ChitchatAnswerNode chitchatAnswerNode;
     private final KnowledgeAnswerNode knowledgeAnswerNode;
@@ -111,14 +114,12 @@ public class MainGraphConfig {
             s.put(GraphStateKeys.SOURCES, new ReplaceStrategy());
             // 生成
             s.put(GraphStateKeys.FINAL_ANSWER, new ReplaceStrategy());
+            // 缓存 (第3刀 B3-a)
+            s.put(GraphStateKeys.CACHE_HIT_KEY, new ReplaceStrategy());
+            s.put(GraphStateKeys.CACHE_HIT_LAYER, new ReplaceStrategy());
             // 流式 & 多轮
             s.put(GraphStateKeys.HISTORY_MESSAGES, new ReplaceStrategy());
-            // 可观测性 (第六刀 Batch 1):
-            // 之所以用 ReplaceStrategy 而非 Append/Merge: CompiledGraph 是 @Bean 单例,
-            // 框架内部会跨调用复用 OverAllState, AppendStrategy 会把上次的 phaseLog
-            // 一直 concat 下去 (实测: 新 sessionId 的请求 phaseLog 里依然带着上几次的全部记录).
-            // 改为 Replace + 节点内 read-modify-write (基类 AbstractGraphNode 实现),
-            // 配合 Controller 入口显式 put 空集合, 双保险.
+            // 可观测性
             s.put(GraphStateKeys.PHASE_LATENCIES, new ReplaceStrategy());
             s.put(GraphStateKeys.PHASE_LOG, new ReplaceStrategy());
             return s;
@@ -132,9 +133,10 @@ public class MainGraphConfig {
                 // ============ 节点装配 ============
                 .addNode(NODE_PREPROCESS, node_async(preprocessNode))
                 .addNode(NODE_INTENT, node_async(intentNode))
+                .addNode(NODE_CACHE_CHECK, node_async(cacheCheckNode))                 // ★
                 .addNode(NODE_FEATURE_RESOLVE, node_async(featureResolveNode))
                 .addNode(NODE_DOC_RETRIEVE, node_async(docRetrieveNode))
-                .addNode(NODE_FAQ_RETRIEVE, node_async(faqRetrieveNode))   // ★
+                .addNode(NODE_FAQ_RETRIEVE, node_async(faqRetrieveNode))
                 .addNode(NODE_MERGER, node_async(mergerNode))
                 .addNode(NODE_CHITCHAT_ANSWER, node_async(chitchatAnswerNode))
                 .addNode(NODE_KNOWLEDGE_ANSWER, node_async(knowledgeAnswerNode))
@@ -144,22 +146,30 @@ public class MainGraphConfig {
                 // ============ 入口边 ============
                 .addEdge(StateGraph.START, NODE_PREPROCESS)
                 .addEdge(NODE_PREPROCESS, NODE_INTENT)
-                // ============ 分流 ① intent 之后: chitchat 短路 / admin_command 短路 / 进 RAG ============
+                // ============ 分流 ① intent 之后: chitchat / admin_command / 进 cache_check ============
                 .addConditionalEdges(
                         NODE_INTENT,
                         edge_async(this::routeAfterIntent),
                         Map.of(
                                 NODE_CHITCHAT_ANSWER, NODE_CHITCHAT_ANSWER,
                                 NODE_ADMIN_AGENT, NODE_ADMIN_AGENT,
+                                NODE_CACHE_CHECK, NODE_CACHE_CHECK              // ★ 改: 原是 feature_resolve
+                        ))
+                // ============ 分流 ② cache_check 之后: 命中 → finalize / 未命中 → feature_resolve ============
+                .addConditionalEdges(
+                        NODE_CACHE_CHECK,
+                        edge_async(this::routeAfterCacheCheck),
+                        Map.of(
+                                NODE_FINALIZE, NODE_FINALIZE,
                                 NODE_FEATURE_RESOLVE, NODE_FEATURE_RESOLVE
                         ))
-                // ============ ★ 并行 fan-out: feature_resolve → doc_retrieve / faq_retrieve ============
+                // ============ 并行 fan-out: feature_resolve → doc_retrieve / faq_retrieve ============
                 .addEdge(NODE_FEATURE_RESOLVE, NODE_DOC_RETRIEVE)
                 .addEdge(NODE_FEATURE_RESOLVE, NODE_FAQ_RETRIEVE)
-                // ============ ★ 并行 fan-in: doc_retrieve / faq_retrieve → merger ============
+                // ============ 并行 fan-in: doc_retrieve / faq_retrieve → merger ============
                 .addEdge(NODE_DOC_RETRIEVE, NODE_MERGER)
                 .addEdge(NODE_FAQ_RETRIEVE, NODE_MERGER)
-                // ============ 分流 ② merger 之后: 二选一 (B5-b-1: admin 已在 intent 阶段短路出去) ============
+                // ============ 分流 ③ merger 之后: ticket / knowledge ============
                 .addConditionalEdges(
                         NODE_MERGER,
                         edge_async(this::routeAfterMerger),
@@ -175,20 +185,13 @@ public class MainGraphConfig {
                 .addEdge(NODE_FINALIZE, StateGraph.END);
 
         CompiledGraph compiled = graph.compile();
-        log.info("[MainGraphConfig] mainGraph compiled: 11 nodes, 2 conditionalEdges "
-                + "(routeAfterIntent=3-way: chitchat/admin/RAG; routeAfterMerger=2-way: ticket/knowledge), "
+        log.info("[MainGraphConfig] mainGraph compiled: 12 nodes, 3 conditionalEdges "
+                + "(routeAfterIntent=3-way / routeAfterCacheCheck=2-way / routeAfterMerger=2-way), "
                 + "1 parallel fanout (Doc + FAQ 并行检索)");
         return compiled;
     }
 
-    // ==================== ConditionalEdge 判定 (B5-b-1 升级: 走 RouteUtil 解码层) ====================
-    //
-    // 第六刀 B5-b-1 关键变更:
-    // 1. routeAfterIntent 从二分流升级为三分流, ADMIN_COMMAND 在 intent 后直接短路到 admin_agent,
-    //    不走 RAG (不调 feature_resolve / doc_retrieve / faq_retrieve / merger).
-    // 2. routeAfterMerger 简化为 ticket / knowledge 二选一; 原 isAdminMetaQuery 路径已移除.
-    // 3. 所有 state 取值改走 RouteUtil.safeIntent / safeString, 修复 Graph 1.1.2 把枚举
-    //    序列化为 ArrayList 导致 state.value(K, Intent.class) 静默 fallback 的潜伏 bug.
+    // ==================== ConditionalEdge 判定 ====================
 
     private String routeAfterIntent(OverAllState state) {
         Intent intent = RouteUtil.safeIntent(state);
@@ -203,10 +206,20 @@ public class MainGraphConfig {
                     intent.getCode(), userRole);
             return NODE_ADMIN_AGENT;
         }
-        // 含: 业务意图 (how_to/troubleshoot/feature_intro/default)
-        //   + 非 admin 用户被分类为 admin_command 时的降级 (走正常 RAG)
-        log.info("[route@intent] intent={} userRole={} → feature_resolve (RAG)",
+        // 业务意图 → 走 cache_check, 命中跳 finalize, 未命中走完整 RAG
+        log.info("[route@intent] intent={} userRole={} → cache_check",
                 intent.getCode(), userRole);
+        return NODE_CACHE_CHECK;
+    }
+
+    /** cache_check 之后: state.CACHE_HIT_KEY 非空 = 命中, 跳 finalize; 否则进 RAG. */
+    private String routeAfterCacheCheck(OverAllState state) {
+        String hitKey = RouteUtil.safeString(state, GraphStateKeys.CACHE_HIT_KEY, null);
+        if (hitKey != null && !hitKey.isBlank()) {
+            log.info("[route@cache_check] HIT → finalize (skip RAG)");
+            return NODE_FINALIZE;
+        }
+        log.info("[route@cache_check] MISS → feature_resolve");
         return NODE_FEATURE_RESOLVE;
     }
 

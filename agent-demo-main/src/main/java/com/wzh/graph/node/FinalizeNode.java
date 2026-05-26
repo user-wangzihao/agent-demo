@@ -50,9 +50,14 @@ public class FinalizeNode extends AbstractGraphNode {
                 .orElse(List.of());
         String finalAnswer = state.value(GraphStateKeys.FINAL_ANSWER, String.class).orElse("(empty)");
 
+        // 第3刀 B3-a: 缓存命中分支
+        String cacheHitLayer = state.value(GraphStateKeys.CACHE_HIT_LAYER, String.class).orElse(null);
+        boolean cacheHit = cacheHitLayer != null && !cacheHitLayer.isBlank();
+
         long total = latencies.values().stream().mapToLong(Long::longValue).sum();
         FinalizeNode.log.info("[{}] ==== Graph 执行完毕 ====", NODE_ID);
-        FinalizeNode.log.info("[{}] 总耗时: {}ms; 各节点: {}", NODE_ID, total, latencies);
+        FinalizeNode.log.info("[{}] 总耗时: {}ms; 各节点: {}; cacheHit={}",
+                NODE_ID, total, latencies, cacheHit ? cacheHitLayer : "false");
         FinalizeNode.log.info("[{}] 处理流程:", NODE_ID);
         for (String line : log) {
             FinalizeNode.log.info("[{}]   - {}", NODE_ID, line);
@@ -62,37 +67,31 @@ public class FinalizeNode extends AbstractGraphNode {
                 finalAnswer.length() > 100 ? finalAnswer.substring(0, 100) + "..." : finalAnswer);
 
         // ==================== B2: Prometheus 指标桥接 ====================
-        // 设计要点:
-        //   1. 这里读 state, 不读节点局部变量 — state 是已经稳定的"事实", 节点临时结构会污染
-        //   2. 所有 metricsCollector.recordXxx 调用都已内部 try-catch, 不会抛出影响主流程
-        //   3. 不在每个 Node 里调 recordNodeLatency, 集中在 finalize 一次性桥接所有节点 —
-        //      这是 "可观测埋点是横切关注点" 的工程体现, Node 业务零侵入
+        // B3-a: 缓存命中时跳过 intent/retrieval 部分指标 (这些节点未执行, state 字段也为空).
+        // 节点耗时 (recordAllNodeLatencies) 仍然桥接 — phaseLatencies 里只会有真实跑过的节点.
         try {
-            // A. 桥接节点耗时 (Timer + Histogram)
             metricsCollector.recordAllNodeLatencies(latencies);
 
-            // B. 桥接意图分布 (Counter)
-            // 走 RouteUtil.safeIntent 解码, 防 Graph 1.1.2 ArrayList 包装的潜伏 bug
-            Intent intent = RouteUtil.safeIntent(state);
-            String intentSource = RouteUtil.safeString(state, GraphStateKeys.INTENT_SOURCE, "unknown");
-            metricsCollector.recordIntent(intent, intentSource);
+            if (!cacheHit) {
+                Intent intent = RouteUtil.safeIntent(state);
+                String intentSource = RouteUtil.safeString(state, GraphStateKeys.INTENT_SOURCE, "unknown");
+                metricsCollector.recordIntent(intent, intentSource);
 
-            // C. 桥接检索质量 (DistributionSummary)
-            List<SearchResult> docChunks = (List<SearchResult>) state
-                    .value(GraphStateKeys.RETRIEVED_DOC_CHUNKS).orElse(Collections.emptyList());
-            List<SearchResult> faqChunks = (List<SearchResult>) state
-                    .value(GraphStateKeys.RETRIEVED_FAQ_CHUNKS).orElse(Collections.emptyList());
-            metricsCollector.recordRetrievedDocChunks(docChunks.size());
-            metricsCollector.recordRetrievedFaqChunks(faqChunks.size());
+                List<SearchResult> docChunks = (List<SearchResult>) state
+                        .value(GraphStateKeys.RETRIEVED_DOC_CHUNKS).orElse(Collections.emptyList());
+                List<SearchResult> faqChunks = (List<SearchResult>) state
+                        .value(GraphStateKeys.RETRIEVED_FAQ_CHUNKS).orElse(Collections.emptyList());
+                metricsCollector.recordRetrievedDocChunks(docChunks.size());
+                metricsCollector.recordRetrievedFaqChunks(faqChunks.size());
+            }
         } catch (Exception e) {
-            // 整个桥接段二次防御 — 单个 record 已经 try-catch, 这里兜底防止 state 读出异常时崩溃
             FinalizeNode.log.warn("[{}] metrics 桥接失败 (不影响主流程)", NODE_ID, e);
         }
 
-        // 不写任何 state, 仅日志
         Map<String, Object> partial = new HashMap<>();
         appendPhaseLog(state, partial,
-                "[" + NODE_ID + "] graph 执行完毕, 总耗时 " + total + "ms");
+                "[" + NODE_ID + "] graph 执行完毕, 总耗时 " + total + "ms"
+                        + (cacheHit ? " (cache HIT " + cacheHitLayer + ")" : ""));
         return partial;
     }
 }

@@ -15,6 +15,7 @@ import com.wzh.graph.support.SourceInfo;
 import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.TokenSinkRegistry;
 import com.wzh.graph.support.TokenStreamSink;
+import com.wzh.service.SemanticCacheService;
 import com.wzh.utils.TokenUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -61,6 +62,7 @@ public class MainGraphSseController {
     private final ChatSessionMapper chatSessionMapper;
     private final ChatMessageMapper chatMessageMapper;
     private final SysUserMapper sysUserMapper;
+    private final SemanticCacheService semanticCacheService;
 
     @PostMapping(value = "/chat-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(@RequestBody Map<String, Object> body) {
@@ -219,6 +221,40 @@ public class MainGraphSseController {
                                     metaEmitted.set(true);
                                 }
                             }
+
+                            // 第3刀 B3-a: cache_check 命中时立即推 meta + 捕获 cacheHit 信息
+                            if ("cache_check".equals(no.node())) {
+                                String hitKey = RouteUtil.safeString(no.state(),
+                                        GraphStateKeys.CACHE_HIT_KEY, null);
+                                String hitLayer = RouteUtil.safeString(no.state(),
+                                        GraphStateKeys.CACHE_HIT_LAYER, null);
+                                if (hitKey != null && !hitKey.isBlank()) {
+                                    outboundCapture.put("cacheHitKey", hitKey);
+                                    outboundCapture.put("cacheHitLayer", hitLayer);
+                                    // 命中场景: 不会经过 merger, 直接在此推 meta
+                                    if (!metaEmitted.get()) {
+                                        @SuppressWarnings("unchecked")
+                                        List<String> images = (List<String>) no.state()
+                                                .value(GraphStateKeys.RELATED_IMAGES)
+                                                .orElse(Collections.emptyList());
+                                        @SuppressWarnings("unchecked")
+                                        List<SourceInfo> sources = (List<SourceInfo>) no.state()
+                                                .value(GraphStateKeys.SOURCES)
+                                                .orElse(Collections.emptyList());
+                                        capturedImages[0] = images;
+                                        capturedSources[0] = sources;
+                                        emitMeta(emitter, sessionId, images, sources);
+                                        metaEmitted.set(true);
+                                    }
+                                }
+                                // 同时捕获 cache_check 写入的 matchedFeature (避免后续节点未执行时 holder 缺失)
+                                String featureFromCache = RouteUtil.safeString(no.state(),
+                                        GraphStateKeys.MATCHED_FEATURE, null);
+                                if (featureFromCache != null && !featureFromCache.isBlank()) {
+                                    outboundCapture.put("matchedFeature", featureFromCache);
+                                }
+                            }
+
                             // merger 完成 → 主链路推真实 meta
                             else if ("merger".equals(no.node()) && !metaEmitted.get()) {
                                 @SuppressWarnings("unchecked")
@@ -236,11 +272,14 @@ public class MainGraphSseController {
                             }
                         })
                         .doOnComplete(() -> {
-                            // v4: 直接从 outboundCapture holder 读, 不依赖 NodeOutput.state() 行为
                             Intent finalIntent = (Intent) outboundCapture.get("intent");
                             String finalFeature = (String) outboundCapture.get("matchedFeature");
-                            log.debug("[DEBUG doOnComplete] finalIntent={} finalFeature='{}' holder={}",
-                                    finalIntent, finalFeature, outboundCapture);
+                            String finalCacheHitKey = (String) outboundCapture.get("cacheHitKey");
+                            String finalCacheHitLayer = (String) outboundCapture.get("cacheHitLayer");
+                            log.debug("[DEBUG doOnComplete] finalIntent={} finalFeature='{}' "
+                                            + "cacheHitKey={} cacheHitLayer={} holder={}",
+                                    finalIntent, finalFeature, finalCacheHitKey, finalCacheHitLayer,
+                                    outboundCapture);
 
                             handleDone(
                                     emitter, sessionId,
@@ -250,7 +289,10 @@ public class MainGraphSseController {
                                     history.size(),
                                     currentUserMessageId,
                                     finalIntent,
-                                    finalFeature);
+                                    finalFeature,
+                                    finalCacheHitKey,
+                                    finalCacheHitLayer,
+                                    regenerateFromMessageId != null);
                         })
                         .doOnError(err -> handleError(
                                 emitter,
@@ -303,7 +345,10 @@ public class MainGraphSseController {
                             int historySize,
                             Long currentUserMessageId,
                             Intent intent,
-                            String matchedFeature) {
+                            String matchedFeature,
+                            String cacheHitKey,
+                            String cacheHitLayer,
+                            boolean isRegenerate) {
         try {
             // 临时 DEBUG: 看 handleDone 收到的 intent / matchedFeature 真实值
             log.debug("[DEBUG handleDone] intent={} matchedFeature='{}' currentUserMessageId={}",
@@ -352,8 +397,75 @@ public class MainGraphSseController {
                     .anyMatch(s -> "FAQ".equals(s.chunkType));
             msg.setFaqHit(faqHit);
 
+            // 第3刀 B3-a: 写入 cache_key / cache_hit_layer
+            // - 命中: cacheHitKey != null && cacheHitLayer != null
+            // - 新写入缓存 (B3-b): cacheHitKey != null && cacheHitLayer == null  (B3-a 阶段不写)
+            // - 不写缓存场景 (chitchat/admin/ticket/faqHit): 两字段都为 null
+            msg.setCacheKey(cacheHitKey);
+            msg.setCacheHitLayer(cacheHitLayer);
+
             chatMessageMapper.insert(msg);
             // MyBatis-Plus 默认自增主键回填: msg.getId() 现在已是 DB 主键
+
+            // ============ 第3刀 B3-b: 未命中时写回缓存 ============
+            // 条件 (5 项全满足才写):
+            //   1. cacheHitKey == null            本次未命中 (避免重复写)
+            //   2. !isRegenerate                  非重新生成场景 (用户对上一版不满意才重新生成,
+            //                                                    新回答质量可能仍不稳定, 漏写比错写代价低)
+            //   3. matchedFeature 非空            缓存的核心承诺是"同 feature 下的相似问题",
+            //                                     feature 缺失就违背承诺
+            //   4. intent 非空 && 业务意图         chitchat/admin_command/ticket 已在拓扑层短路, 但显式
+            //                                     判断防御 (兜底)
+            //   5. fullContent 非空                空答案不缓存
+            //
+            // 关于 faqHit: 之前曾有"faqHit=true 不缓存"的设计 (理由: FAQ 单独检索通路够用).
+            // 实测表明 FAQ 召回后, 最终答案仍是 LLM 综合 doc+FAQ 生成的全新文本,
+            // 与单一 FAQ 答案并不等价. 随着 FAQ 库扩充, 大量典型问题都会触发 FAQ 命中,
+            // 不缓存等同于放弃主战场. 故去掉 faqHit 排除规则.
+            //
+            // 命中时 cache_key/cache_hit_layer 已在 msg.set 阶段填好;
+            // 写入时仅 cache_key 有值, cache_hit_layer 保持 null (区分"命中消费" vs "新生成写回").
+            boolean shouldCacheWrite =
+                    cacheHitKey == null
+                            && !isRegenerate
+                            && matchedFeature != null && !matchedFeature.isBlank()
+                            && isCacheableIntent(intent)
+                            && fullContent != null && !fullContent.isBlank();
+
+            if (shouldCacheWrite) {
+                try {
+                    // userMessage: 从当前 user 消息反查 (无法从 state 取, state 已被 Graph 消费完)
+                    String userQuery = lookupUserQuery(currentUserMessageId);
+                    if (userQuery != null && !userQuery.isBlank()) {
+                        String newCacheKey = semanticCacheService.put(
+                                userQuery, matchedFeature, intent,
+                                fullContent,
+                                sources == null ? Collections.emptyList() : sources,
+                                relatedImages == null ? Collections.emptyList() : relatedImages);
+                        if (newCacheKey != null) {
+                            // 回填到 chat_message: cache_key=新写入的 key, cache_hit_layer 保持 null
+                            chatMessageMapper.update(null,
+                                    new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<ChatMessage>()
+                                            .eq(ChatMessage::getId, msg.getId())
+                                            .set(ChatMessage::getCacheKey, newCacheKey));
+                            log.info("[cache-write] new cache written assistantMsgId={} cacheKey={} "
+                                            + "feature='{}' intent={}",
+                                    msg.getId(), newCacheKey, matchedFeature, intent.getCode());
+                        }
+                    } else {
+                        log.info("[cache-write] userQuery empty, skip writing cache");
+                    }
+                } catch (Exception e) {
+                    // 写缓存失败不影响主流程
+                    log.warn("[cache-write] failed assistantMsgId={}", msg.getId(), e);
+                }
+            } else {
+                log.info("[cache-write] skip: hit={} regen={} feature='{}' intent={} faqHit={} contentLen={}",
+                        cacheHitKey != null, isRegenerate, matchedFeature,
+                        intent == null ? null : intent.getCode(), faqHit,
+                        fullContent == null ? 0 : fullContent.length());
+            }
+
 
             // 首轮对话自动生成标题 (history 为空时是首轮)
             if (historySize == 0) {
@@ -549,5 +661,39 @@ public class MainGraphSseController {
         if (o instanceof Number n) return n.longValue();
         try { return Long.parseLong(String.valueOf(o)); }
         catch (NumberFormatException e) { return null; }
+    }
+
+    /**
+     * 第3刀 B3-b: 判断 intent 是否值得缓存.
+     *
+     * <p>当前业务意图全部缓存: HOW_TO / TROUBLESHOOT / FEATURE_INTRO / DEFAULT.
+     * 不缓存意图: CHITCHAT (短路, 不会走到这) / ADMIN_COMMAND (短路) / 显式排除的特殊意图.</p>
+     *
+     * <p>采用白名单写法防御未来新增 Intent 时默认行为偏激进 (新增意图默认走缓存).
+     * 现在的所有"业务意图"都明确列出, 新增意图必须手动加入白名单才会被缓存.</p>
+     */
+    private boolean isCacheableIntent(Intent intent) {
+        if (intent == null) return false;
+        return switch (intent) {
+            case HOW_TO, TROUBLESHOOT, FEATURE_INTRO, DEFAULT -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * 第3刀 B3-b: 反查 user 消息原文 (写缓存时用 query 算 cacheKey).
+     *
+     * <p>不能直接从 state 取: handleDone 在 Graph stream 完成后调, state 已被消费.
+     * 走 DB 反查一次, 代价小 (单行索引查询).</p>
+     */
+    private String lookupUserQuery(Long userMessageId) {
+        if (userMessageId == null) return null;
+        try {
+            ChatMessage m = chatMessageMapper.selectById(userMessageId);
+            return m == null ? null : m.getContent();
+        } catch (Exception e) {
+            log.warn("[cache-write] lookupUserQuery failed userMessageId={}", userMessageId, e);
+            return null;
+        }
     }
 }

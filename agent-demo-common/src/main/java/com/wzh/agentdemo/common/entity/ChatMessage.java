@@ -69,4 +69,17 @@ public class ChatMessage {
     @TableField("cache_key")
     private String cacheKey;
 
+    /**
+     * B3-a (第3刀语义缓存): 本次回答的缓存命中层级.
+     * <ul>
+     *   <li>L1: 精确命中</li>
+     *   <li>L2: 语义命中</li>
+     *   <li>NULL: 未命中 (可能是新写入了缓存, 也可能是不缓存的场景如 chitchat/admin/ticket/faqHit)</li>
+     * </ul>
+     * 配合 cacheKey 使用: cacheKey != null && cacheHitLayer != null → 命中消费;
+     * cacheKey != null && cacheHitLayer == null → 新生成并写回缓存.
+     */
+    @TableField("cache_hit_layer")
+    private String cacheHitLayer;
+
 }

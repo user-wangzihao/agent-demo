@@ -41,4 +41,10 @@ public class SemanticCacheProperties {
 
     /** Milvus collection 名称. */
     private String milvusCollection = "semantic_cache_vectors";
+
+    /** 命中时模拟流式推送的分块大小 (字符数). */
+    private int replayChunkSize = 8;
+
+    /** 命中时模拟流式推送的分块间隔 (毫秒). */
+    private int replayChunkIntervalMs = 15;
 }
