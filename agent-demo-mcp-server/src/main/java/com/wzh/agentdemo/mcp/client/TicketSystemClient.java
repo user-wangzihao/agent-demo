@@ -1,6 +1,7 @@
 package com.wzh.agentdemo.mcp.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.wzh.agentdemo.common.mapper.ChatMessageMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,6 +28,8 @@ import java.util.Map;
 public class TicketSystemClient {
 
     private final ObjectMapper objectMapper;
+
+    private final ChatMessageMapper chatMessageMapper;
 
     @Value("${ticket-system.base-url}")
     private String baseUrl;

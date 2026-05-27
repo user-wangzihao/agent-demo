@@ -131,6 +131,33 @@ public final class RouteUtil {
     }
 
     /**
+     * 从 state 安全读取 Boolean 字段. defaultValue 用于解码失败 / 字段缺失时的兜底.
+     *
+     * <p>设计对齐 {@link #safeString}: 同样防御 Graph 1.1.2 对原始值做包装/序列化的怪行为.
+     * 当前观察到 Boolean 通常不被包装 (基础类型 + 装箱), 但为统一风格仍走 decode 兜底.</p>
+     *
+     * <p>典型用法 ({@link GraphStateKeys#IS_REGENERATE}):
+     * {@code boolean isRegen = RouteUtil.safeBool(state, GraphStateKeys.IS_REGENERATE, false);}</p>
+     *
+     * @param defaultValue 字段缺失 / 解码失败 / null 输入时的返回值
+     */
+    public static boolean safeBool(OverAllState state, String key, boolean defaultValue) {
+        Object raw = state.value(key).orElse(null);
+        if (raw == null) return defaultValue;
+        if (raw instanceof Boolean b) return b;
+        if (raw instanceof String s) return Boolean.parseBoolean(s);
+        if (raw instanceof List<?> list && !list.isEmpty()) {
+            // 兼容 ArrayList[_, value] / ArrayList[value] 包装
+            Object candidate = list.size() > 1 ? list.get(1) : list.get(0);
+            if (candidate instanceof Boolean b) return b;
+            if (candidate instanceof String s) return Boolean.parseBoolean(s);
+        }
+        log.warn("[RouteUtil#safeBool] 无法解析 key={} raw 类型={} 值={}, 用 default={}",
+                key, raw.getClass(), raw, defaultValue);
+        return defaultValue;
+    }
+
+    /**
      * 反序列化从 state 取出的 Intent. 兼容 3 种形态:
      * <ul>
      *   <li>原 Intent 实例 → 直接返回</li>

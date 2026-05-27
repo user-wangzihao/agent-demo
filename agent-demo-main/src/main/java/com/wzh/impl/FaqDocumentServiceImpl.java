@@ -14,6 +14,7 @@ import com.wzh.entity.dto.PageRequest;
 import com.wzh.mapper.FaqDocumentMapper;
 import com.wzh.service.FaqDocumentService;
 import com.wzh.service.FaqMilvusService;
+import com.wzh.service.SemanticCacheService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -29,6 +30,8 @@ public class FaqDocumentServiceImpl extends ServiceImpl<FaqDocumentMapper, FaqDo
     private final ObjectMapper objectMapper;
     /** 第四刀: 删除/更新 FAQ 时联动清理 faq_vectors */
     private final FaqMilvusService faqMilvusService;
+    /** B4: 删除 FAQ 时联动失效缓存 (与你指定的 5 个失效点对齐: 重学/重新学习FAQ 走 FaqVectorizeService, 此处只管 delete) */
+    private final SemanticCacheService semanticCacheService;
 
     @Override
     public Long addFaq(FaqDocumentDTO dto) {
@@ -71,10 +74,24 @@ public class FaqDocumentServiceImpl extends ServiceImpl<FaqDocumentMapper, FaqDo
 
     @Override
     public void deleteFaq(Long id) {
+        // B4: 删除前先反查 relatedFeatureName, 用于事后失效缓存.
+        // 必须在 removeById 之前读 — MyBatis-Plus 逻辑删除后仍能 selectById 但走的是 LogicDelete
+        // 隐含 deleted=0 过滤; 为避免依赖逻辑删配置不一致, 提前读最稳.
+        // null/blank 回退 "通用FAQ" 与 FaqVectorizeService.learnFaq 的 GENERAL_MARKER 对齐.
+        FaqDocument old = this.getById(id);
+        String featureName = (old != null && StrUtil.isNotBlank(old.getRelatedFeatureName()))
+                ? old.getRelatedFeatureName() : "通用FAQ";
+
         this.removeById(id);
         // 第四刀: MySQL 软删后, 联动清 Milvus, 避免"鬼向量"被召回
         faqMilvusService.deleteByFaqId(id);
         log.info("FAQ [{}] 已软删除, 关联向量已清除", id);
+
+        // B4: FAQ 内容已从知识库消失, 老缓存里基于该 FAQ 答案的回答现在是"鬼答案", 失效该 feature.
+        // 注意失效粒度: invalidateByFeatureName 会清整个 feature 名下的所有缓存条目, 不是只清这条 FAQ
+        // 相关的. 这是设计上的取舍 — cacheKey 的 hash 只绑 (featureName + intent + query),
+        // 没办法精确知道哪条 cache 用了哪条 FAQ. feature 粒度失效是 demo 量级最干净的策略.
+        semanticCacheService.invalidateByFeatureName(featureName);
     }
 
     // ========== 转换 (未改动) ==========

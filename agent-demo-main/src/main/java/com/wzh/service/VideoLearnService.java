@@ -31,6 +31,8 @@ public class VideoLearnService {
     private final DashScopeService dashScopeService;
     private final MilvusService milvusService;
     private final DashScopeConfig dashScopeConfig;
+    /** B4: 学习视频后联动失效该 feature 的语义缓存 */
+    private final SemanticCacheService semanticCacheService;
 
     //@Value("${dashscope.api-key}")
     //private String apiKey;
@@ -74,6 +76,10 @@ public class VideoLearnService {
         }
 
         log.info("功能文档 [{}] 的所有视频学习完成", featureName);
+
+        // B4: 视频学习产物已写入 Milvus, 该 feature 的回答内容会变, 失效相关缓存.
+        // 即使部分视频学习失败 (learnStatus=3), 也只要有任意视频跑过, 都意味着知识库发生变化, 失效是必要的.
+        semanticCacheService.invalidateByFeatureName(featureName);
     }
 
     /**
@@ -162,6 +168,10 @@ public class VideoLearnService {
             video.setLearnStatus(2);
             videoDocumentService.updateById(video);
             log.info("视频 [{}] (id={}) 学习完成", video.getOriginalName(), videoId);
+
+            // B4: 仅在学习成功路径上失效缓存. 失败分支 (catch 块) 不失效,
+            // 因为失败意味着数据没真正变 (Milvus 没插入新 chunk).
+            semanticCacheService.invalidateByFeatureName(featureName);
         } catch (Exception e) {
             video.setLearnStatus(3);
             videoDocumentService.updateById(video);

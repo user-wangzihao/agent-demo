@@ -55,6 +55,8 @@ public class FeatureDocumentLearnService {
     private final DashScopeService dashScopeService;
     private final KnowledgeExtractService knowledgeExtractService;
     private final ImageUnderstandingService imageUnderstandingService;
+    /** B4: 学习完成后联动失效该 feature 的语义缓存. 失败容错由 SemanticCacheService 内部 try-catch 兜底. */
+    private final SemanticCacheService semanticCacheService;
 
     // ==================== 公开入口 ====================
 
@@ -120,6 +122,10 @@ public class FeatureDocumentLearnService {
         featureDocumentService.updateById(update);
 
         log.info("文档 [{}] 学习完成，共生成 {} 个知识块", featureName, chunks.size());
+
+        // B4: 数据已变, 失效该 feature 名下所有缓存. 这一步即使失败也不影响学习结果落地,
+        // SemanticCacheService.invalidateByFeatureName 内部已 try-catch.
+        semanticCacheService.invalidateByFeatureName(featureName);
     }
 
     // ==================== 私有: section 摘要与交叉引用 ====================

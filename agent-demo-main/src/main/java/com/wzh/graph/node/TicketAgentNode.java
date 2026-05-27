@@ -111,6 +111,12 @@ public class TicketAgentNode extends AbstractGraphNode {
         Map<String, Object> partial = new HashMap<>();
         partial.put(GraphStateKeys.FINAL_ANSWER, answer);
 
+        // B5: 标记本轮响应是工单 Agent 生成, 用于 Controller cache-write 判定时排除.
+        // 这同时覆盖对话工单和按钮工单两种场景 — 任何走到 ticket_agent 的流量都不应被语义缓存.
+        // 借 B5 顺手修存量 bug: 之前对话工单"已为您提交工单 TK-xxx"会错误写入缓存,
+        // 下次同 query 命中会返回过时的工单号原文.
+        partial.put(GraphStateKeys.IS_TICKET_RESPONSE, true);
+
         // 第六刀 Batch 2 hotfix v2: 把 history 回溯出来的 feature 写回 partial state,
         // 让 Controller 在 doOnNext 抢救式捕获时, ticket_agent 节点完成后能从 no.state() 读到.
         // 这是给 controller 端的 decodeString 捕获用, 节点端不直接写 holder (v5 起放弃节点端写法).
@@ -153,13 +159,20 @@ public class TicketAgentNode extends AbstractGraphNode {
         // 透传给 TicketSystem 用于工单详情页"对话历史"卡片渲染
         String chatHistoryJson = buildChatHistoryJson(state);
 
-        // Map.of 上限是 10 个键, 这里 5 个,后续如再加要换 Map.ofEntries
+        // B5: 工单按钮场景的目标 assistant 消息 id, 透传给 MCP submitTicket 工具 → McpMeta.
+        // 普通对话提工单时此字段为 null, 透传 0L (MCP 端 0L 视为 null 语义, 不回调 main).
+        // 走 state 而非闭包是为了在 Graph 内自然透传, 跟其他用户上下文字段对称.
+        Object ticketBtnObj = state.value(GraphStateKeys.TICKET_BUTTON_TRIGGERED_BY).orElse(null);
+        long ticketButtonTriggeredBy = (ticketBtnObj instanceof Number n) ? n.longValue() : 0L;
+
+        // Map.of 上限是 10 个键, 这里 6 个,后续如再加要换 Map.ofEntries
         return Map.of(
-                "userId",          userIdObj    == null ? "unknown"  : String.valueOf(userIdObj),
-                "userName",        userNameObj  == null ? "未知用户"  : String.valueOf(userNameObj),
-                "sessionId",       sessionIdObj == null ? 0L         : toLong(sessionIdObj),
-                "featureName",     matchedFeature == null ? "通用FAQ" : matchedFeature,
-                "chatHistoryJson", chatHistoryJson
+                "userId",                   userIdObj    == null ? "unknown"  : String.valueOf(userIdObj),
+                "userName",                 userNameObj  == null ? "未知用户"  : String.valueOf(userNameObj),
+                "sessionId",                sessionIdObj == null ? 0L         : toLong(sessionIdObj),
+                "featureName",              matchedFeature == null ? "通用FAQ" : matchedFeature,
+                "chatHistoryJson",          chatHistoryJson,
+                "ticketButtonTriggeredBy",  ticketButtonTriggeredBy
         );
     }
 

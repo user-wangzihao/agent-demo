@@ -82,4 +82,27 @@ public class ChatMessage {
     @TableField("cache_hit_layer")
     private String cacheHitLayer;
 
+    /**
+     * B5 (第3刀语义缓存负反馈入口3): 用户主动点"提交工单"按钮后的工单号.
+     *
+     * <p><b>三态取值</b>:
+     * <ul>
+     *   <li>{@code null}: 未提单 / 提单失败 (前端按钮可点)</li>
+     *   <li>{@code "SUBMITTING"}: 提单中占位 (前端按钮置灰显示"提交中...";
+     *       由 Controller 在按钮端点入口处写入, MCP 回填真实 ticketNo 时覆盖,
+     *       handleDone 兜底检查若仍是占位则回滚 null)</li>
+     *   <li>{@code "TK-yyyyMMdd-NNNN"}: 工单成功 (前端按钮置灰显示"已提单 TK-...";
+     *       由 MCP 调 TicketSystem 成功后, 同步回调 main 的 /internal/ticket/callback 写入)</li>
+     * </ul>
+     *
+     * <p><b>仅 assistant 消息有意义</b>: 用户语义上是"对某条 AI 答复不满意 → 转工单",
+     * 工单号挂在被吐槽的那条 assistant 消息上, user 消息恒为 null.</p>
+     *
+     * <p><b>设计动机</b>: 通过 MCP 端的事实回调直接落库, 不依赖 LLM 答复文本里的工单号正则提取.
+     * 这是因为工单成功的事实 (HTTP 200 + ticketNo 非空) 在 TicketSystem 响应那一刻就已确定,
+     * 让 LLM 答复决定数据落库相当于把"系统真相"交给"语言模型解读", 方向反了.</p>
+     */
+    @TableField("submitted_ticket_id")
+    private String submittedTicketId;
+
 }

@@ -38,6 +38,8 @@ public class FaqVectorizeService {
     private final DashScopeService dashScopeService;
     private final FaqMilvusService faqMilvusService;
     private final ImageUnderstandingService imageUnderstandingService;
+    /** B4: 学习完成后联动失效该 feature 的语义缓存. */
+    private final SemanticCacheService semanticCacheService;
 
     /** 通用 FAQ 的 feature_name 字面值 (沿用既定约定; 与 FaqRetrieveProperties.generalMarker 对齐) */
     private static final String GENERAL_MARKER = "通用FAQ";
@@ -107,6 +109,11 @@ public class FaqVectorizeService {
 
         log.info("FAQ [{}] 学习完成, 共生成 {} 个 chunk (写入 faq_vectors)",
                 faq.getQuestion(), chunks.size());
+
+        // B4: 数据已变, 失效该 feature 缓存. featureName 见前文 (relatedFeatureName 非空时即用,
+        // 否则 = "通用FAQ"). 关键: invalidate 是按 feature 维度的, 通用 FAQ 在 demo 里集中失效
+        // 是可接受的 (通用 FAQ 缓存条目本来就少).
+        semanticCacheService.invalidateByFeatureName(featureName);
     }
 
     /**

@@ -15,6 +15,7 @@ import com.wzh.graph.support.SourceInfo;
 import com.wzh.graph.support.RouteUtil;
 import com.wzh.graph.support.TokenSinkRegistry;
 import com.wzh.graph.support.TokenStreamSink;
+import com.wzh.config.SemanticCacheProperties;
 import com.wzh.service.SemanticCacheService;
 import com.wzh.utils.TokenUtil;
 import lombok.RequiredArgsConstructor;
@@ -63,6 +64,7 @@ public class MainGraphSseController {
     private final ChatMessageMapper chatMessageMapper;
     private final SysUserMapper sysUserMapper;
     private final SemanticCacheService semanticCacheService;
+    private final SemanticCacheProperties semanticCacheProperties;
 
     @PostMapping(value = "/chat-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(@RequestBody Map<String, Object> body) {
@@ -90,10 +92,20 @@ public class MainGraphSseController {
         // 此时 user 消息已在 DB 里, 旧 assistant 消息要删, message/imageUrls 反查得到.
         Long regenerateFromMessageId = body.get("regenerateFromMessageId") == null ? null
                 : toLong(body.get("regenerateFromMessageId"));
+        // B5: 工单按钮场景标记. 非空 = 用户点了"提交工单"按钮.
+        // 此时 user 消息("提交工单") 已由按钮端点 submitTicketForMessage 在调本方法前插入,
+        // 老 assistant 消息已被占位 submitted_ticket_id='SUBMITTING'.
+        // 普通对话 chatStream POST 不传, 保持 null.
+        Long ticketButtonTriggeredBy = body.get("ticketButtonTriggeredBy") == null ? null
+                : toLong(body.get("ticketButtonTriggeredBy"));
 
         // 2. session 处理
         Long sessionId;
         Long currentUserMessageId;
+        // B3-c: regenerate 场景的老答案 cacheKey, 仅在 regenerate 分支非空; 普通对话保持 null.
+        // 用途 1: 跑 Graph 前 incrementFeedback(+1) 给老答案打负反馈分.
+        // 用途 2: 不直接影响 initial state, 因为 IS_REGENERATE 标记本身已足够让 CacheCheckNode 跳过.
+        String regenerateOldCacheKey = null;
         if (regenerateFromMessageId != null) {
             // ===== regenerate 分支: 反查 user 消息 + 删旧 assistant + 不插入新 user 消息 =====
             RegenerateContext rc = resolveRegenerateContext(regenerateFromMessageId);
@@ -101,9 +113,52 @@ public class MainGraphSseController {
             currentUserMessageId = rc.userMessageId;
             userMessage = rc.userContent;
             userImageUrls = rc.userImageUrls;
-            log.info("[regenerate] fromAssistantId={} → sessionId={} userMsgId={} content.len={}",
+            regenerateOldCacheKey = rc.oldCacheKey;
+            log.info("[regenerate] fromAssistantId={} → sessionId={} userMsgId={} content.len={} oldCacheKey={}",
                     regenerateFromMessageId, sessionId, currentUserMessageId,
-                    userMessage == null ? 0 : userMessage.length());
+                    userMessage == null ? 0 : userMessage.length(),
+                    regenerateOldCacheKey == null ? "null" : regenerateOldCacheKey);
+
+            // B3-c: 给老 cacheKey 累加 regenerate 负反馈分.
+            // 时机: 跑 Graph 之前, 与新答案是否生成成功完全解耦. 即使 Graph 后续异常, 这个
+            // 负反馈也应被记录 — 因为"用户点了重新生成" = "对老答案投了不信任票"的事实即时确定.
+            // 失败容错: incrementFeedback 内部已 try/catch, 不影响主流程.
+            if (regenerateOldCacheKey != null && !regenerateOldCacheKey.isBlank()) {
+                semanticCacheService.incrementFeedback(
+                        regenerateOldCacheKey,
+                        semanticCacheProperties.getFeedbackWeightRegenerate());
+                log.info("[regenerate] feedback +{} applied to oldCacheKey={}",
+                        semanticCacheProperties.getFeedbackWeightRegenerate(),
+                        regenerateOldCacheKey);
+            }
+        } else if (ticketButtonTriggeredBy != null) {
+            // ===== B5 工单按钮分支: 伪 user 消息已由 submitTicketForMessage 端点插入, 这里只反查 =====
+            // 注意:
+            //   - 伪 user 消息内容固定为 "提交工单" (端点入口处插入时即写死)
+            //   - 老 assistant 消息的 submitted_ticket_id 已被置为 'SUBMITTING' 占位
+            //   - 负反馈 +3 不在这里调 — 跟 regenerate 不同, 工单成功的事实只有 MCP 回调时才确定,
+            //     由 MCP → /internal/ticket/callback 链路异步打分. handleDone 时如占位还在则回滚.
+            ChatMessage targetMsg = chatMessageMapper.selectById(ticketButtonTriggeredBy);
+            if (targetMsg == null) {
+                emitter.completeWithError(new RuntimeException(
+                        "ticketButtonTriggeredBy 消息不存在: " + ticketButtonTriggeredBy));
+                return emitter;
+            }
+            sessionId = targetMsg.getSessionId();
+            // body.message 实际由端点构造时填 "提交工单", 这里再校验一下兜底
+            if (userMessage == null || userMessage.isBlank()) {
+                userMessage = "提交工单";
+            }
+            // 反查 session 里最新的 user 消息 (端点刚插的 "提交工单"). 比插入端点回传 id 更鲁棒.
+            ChatMessage latestUser = chatMessageMapper.selectOne(
+                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ChatMessage>()
+                            .eq(ChatMessage::getSessionId, sessionId)
+                            .eq(ChatMessage::getRole, "user")
+                            .orderByDesc(ChatMessage::getId)
+                            .last("LIMIT 1"));
+            currentUserMessageId = latestUser == null ? null : latestUser.getId();
+            log.info("[ticket-button] targetId={} sessionId={} pseudoUserMsgId={} content='{}'",
+                    ticketButtonTriggeredBy, sessionId, currentUserMessageId, userMessage);
         } else {
             // ===== 普通分支: 原逻辑 =====
             sessionId = ensureSession(incomingSessionId, userId);
@@ -156,6 +211,24 @@ public class MainGraphSseController {
         // 避免 CompiledGraph 单例跨调用复用 OverAllState 导致 phaseLog 累加.
         initial.put(GraphStateKeys.PHASE_LOG, new ArrayList<String>());
         initial.put(GraphStateKeys.PHASE_LATENCIES, new HashMap<String, Long>());
+        // B3-c: regenerate 标记, CacheCheckNode 据此跳过 L1/L2 查询走完整 RAG.
+        // 仅 regenerate 分支才显式 put true; 普通对话不传, CacheCheckNode 走 safeBool 兜底 false.
+        // 显式 put 比依赖 state 残留更鲁棒 — 即使 OverAllState 跨调用复用, 本字段每次都被本请求覆盖.
+        if (regenerateFromMessageId != null) {
+            initial.put(GraphStateKeys.IS_REGENERATE, true);
+        } else {
+            // 主动写 false 防御: CompiledGraph 单例可能残留上次的 true.
+            // 与 PHASE_LOG/PHASE_LATENCIES 显式重置同样动机 (Batch 1 已修过这类问题).
+            initial.put(GraphStateKeys.IS_REGENERATE, false);
+        }
+        // B5: 工单按钮场景标记. 透传给 TicketAgentNode.buildToolContext → McpMeta → MCP submitTicket.
+        // MCP 端工单成功后用这个 id 回调 main 写 submitted_ticket_id.
+        // 同样显式 put 防御 state 残留: 普通对话明确写 0L, 跟"按钮场景非空 Long"区分.
+        if (ticketButtonTriggeredBy != null) {
+            initial.put(GraphStateKeys.TICKET_BUTTON_TRIGGERED_BY, ticketButtonTriggeredBy);
+        } else {
+            initial.put(GraphStateKeys.TICKET_BUTTON_TRIGGERED_BY, 0L);
+        }
         // v5 起 OUTBOUND_CAPTURE 不再通过 state 透传, Controller 在 doOnNext 闭包里直接持有.
 
         // 7. 异步执行 Graph stream
@@ -204,6 +277,16 @@ public class MainGraphSseController {
                                 if (decoded != null && !decoded.isBlank()) {
                                     outboundCapture.put("matchedFeature", decoded);
                                     log.debug("[DEBUG] captured MATCHED_FEATURE={} at node='ticket_agent' (fallback)", decoded);
+                                }
+                            }
+                            // B5: ticket_agent 完成 → 捕获 IS_TICKET_RESPONSE 标记, 后续 handleDone
+                            // 的 cache-write 判定据此排除工单流量. 同时覆盖对话工单和按钮工单两种场景.
+                            if ("ticket_agent".equals(no.node())) {
+                                boolean isTicket = RouteUtil.safeBool(no.state(),
+                                        GraphStateKeys.IS_TICKET_RESPONSE, false);
+                                if (isTicket) {
+                                    outboundCapture.put("isTicketResponse", true);
+                                    log.debug("[DEBUG] captured IS_TICKET_RESPONSE=true at node='ticket_agent'");
                                 }
                             }
 
@@ -276,10 +359,13 @@ public class MainGraphSseController {
                             String finalFeature = (String) outboundCapture.get("matchedFeature");
                             String finalCacheHitKey = (String) outboundCapture.get("cacheHitKey");
                             String finalCacheHitLayer = (String) outboundCapture.get("cacheHitLayer");
+                            // B5: ticket_agent 节点完成时被设为 true; 普通流量为 null/false.
+                            Boolean finalIsTicketResponseBoxed = (Boolean) outboundCapture.get("isTicketResponse");
+                            boolean finalIsTicketResponse = Boolean.TRUE.equals(finalIsTicketResponseBoxed);
                             log.debug("[DEBUG doOnComplete] finalIntent={} finalFeature='{}' "
-                                            + "cacheHitKey={} cacheHitLayer={} holder={}",
+                                            + "cacheHitKey={} cacheHitLayer={} isTicket={} holder={}",
                                     finalIntent, finalFeature, finalCacheHitKey, finalCacheHitLayer,
-                                    outboundCapture);
+                                    finalIsTicketResponse, outboundCapture);
 
                             handleDone(
                                     emitter, sessionId,
@@ -292,7 +378,9 @@ public class MainGraphSseController {
                                     finalFeature,
                                     finalCacheHitKey,
                                     finalCacheHitLayer,
-                                    regenerateFromMessageId != null);
+                                    regenerateFromMessageId != null,
+                                    finalIsTicketResponse,
+                                    ticketButtonTriggeredBy);
                         })
                         .doOnError(err -> handleError(
                                 emitter,
@@ -348,7 +436,9 @@ public class MainGraphSseController {
                             String matchedFeature,
                             String cacheHitKey,
                             String cacheHitLayer,
-                            boolean isRegenerate) {
+                            boolean isRegenerate,
+                            boolean isTicketResponse,
+                            Long ticketButtonTriggeredBy) {
         try {
             // 临时 DEBUG: 看 handleDone 收到的 intent / matchedFeature 真实值
             log.debug("[DEBUG handleDone] intent={} matchedFeature='{}' currentUserMessageId={}",
@@ -425,9 +515,14 @@ public class MainGraphSseController {
             //
             // 命中时 cache_key/cache_hit_layer 已在 msg.set 阶段填好;
             // 写入时仅 cache_key 有值, cache_hit_layer 保持 null (区分"命中消费" vs "新生成写回").
+            //
+            // B5: 加 !isTicketResponse 排除工单流量. 任何走到 ticket_agent 的响应 ("已为您提交工单 TK-xxx"
+            // / "提交失败...") 都不应该进语义缓存 — 下次同 query 命中会返回过时的工单号原文,
+            // 或者把 LLM 编造的 fake 工单号传染开来. 同时覆盖对话工单和按钮工单两种触发场景.
             boolean shouldCacheWrite =
                     cacheHitKey == null
                             && !isRegenerate
+                            && !isTicketResponse
                             && matchedFeature != null && !matchedFeature.isBlank()
                             && isCacheableIntent(intent)
                             && fullContent != null && !fullContent.isBlank();
@@ -460,8 +555,8 @@ public class MainGraphSseController {
                     log.warn("[cache-write] failed assistantMsgId={}", msg.getId(), e);
                 }
             } else {
-                log.info("[cache-write] skip: hit={} regen={} feature='{}' intent={} faqHit={} contentLen={}",
-                        cacheHitKey != null, isRegenerate, matchedFeature,
+                log.info("[cache-write] skip: hit={} regen={} ticket={} feature='{}' intent={} faqHit={} contentLen={}",
+                        cacheHitKey != null, isRegenerate, isTicketResponse, matchedFeature,
                         intent == null ? null : intent.getCode(), faqHit,
                         fullContent == null ? 0 : fullContent.length());
             }
@@ -472,12 +567,60 @@ public class MainGraphSseController {
                 autoUpdateSessionTitle(sessionId);
             }
 
+            // B5: 工单按钮场景兜底回滚.
+            //
+            // 链路: 按钮端点入口处把目标 assistant 消息的 submitted_ticket_id 置 'SUBMITTING' 占位,
+            // 防止用户连续点击重复提单. 正常路径下 MCP 调 TicketSystem 成功后, 同步回调 main 端
+            // /internal/ticket/callback 把占位覆盖成真实 ticketNo. 但有几种异常路径会导致占位卡住:
+            //   1. Graph 跑挂了, ticket_agent 根本没跑到
+            //   2. LLM 没决定调 submitTicket 工具 (prompt 失效或者 ticket 路由没命中)
+            //   3. TicketSystem 返回失败 (code != 200), MCP 没回调
+            //   4. MCP 回调 main 时网络异常
+            //
+            // 兜底策略: handleDone 时检查 submitted_ticket_id, 若仍是占位 'SUBMITTING' 说明未成功
+            // 收到 MCP 回调 → 回滚为 null, 让前端按钮恢复可点状态, 用户可重试.
+            // 已是 'TK-...' 真实工单号的不动 (MCP 已成功回填).
+            //
+            // 仅工单按钮场景需要此检查; 普通对话提工单 ticketButtonTriggeredBy=null, 跳过.
+            String submittedTicketIdAfterCallback = null;
+            if (ticketButtonTriggeredBy != null) {
+                try {
+                    ChatMessage targetMsg = chatMessageMapper.selectById(ticketButtonTriggeredBy);
+                    if (targetMsg != null) {
+                        String currentValue = targetMsg.getSubmittedTicketId();
+                        if ("SUBMITTING".equals(currentValue)) {
+                            // 占位还在 → 工单未成功 → 回滚 null
+                            chatMessageMapper.update(null,
+                                    new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<ChatMessage>()
+                                            .eq(ChatMessage::getId, ticketButtonTriggeredBy)
+                                            .set(ChatMessage::getSubmittedTicketId, null));
+                            log.warn("[ticket-button] handleDone rollback SUBMITTING → null targetId={} " +
+                                            "(reason: MCP callback 未到达, 工单可能未成功)",
+                                    ticketButtonTriggeredBy);
+                        } else {
+                            // 已是真实 ticketNo, MCP 回调成功
+                            submittedTicketIdAfterCallback = currentValue;
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("[ticket-button] handleDone 兜底检查失败 targetId={}",
+                            ticketButtonTriggeredBy, e);
+                }
+            }
+
             // done 事件返回 assistantMessageId, 让前端知道这条新 assistant 消息的 DB 主键.
             // 前端据此把 id 挂到本地 message 对象上, 后续点赞/点踩/重新生成才能定位到具体消息.
             // 此前 done.data 为空串, 导致刚生成的消息无法立即接收反馈 (只有刷新页面后才行).
-            String doneJson = objectMapper.writeValueAsString(Map.of(
-                    "assistantMessageId", msg.getId()
-            ));
+            //
+            // B5: 工单按钮场景额外返回 targetAssistantMessageId + submittedTicketId, 让前端把
+            // 老消息标记为已提单 + 按钮置灰显示工单号. submittedTicketId 为 null 时前端按钮保持可点.
+            Map<String, Object> doneBody = new java.util.HashMap<>();
+            doneBody.put("assistantMessageId", msg.getId());
+            if (ticketButtonTriggeredBy != null) {
+                doneBody.put("targetAssistantMessageId", ticketButtonTriggeredBy);
+                doneBody.put("submittedTicketId", submittedTicketIdAfterCallback);
+            }
+            String doneJson = objectMapper.writeValueAsString(doneBody);
             emitter.send(SseEmitter.event().name("done").data(doneJson));
             emitter.complete();
         } catch (Exception e) {
@@ -626,6 +769,10 @@ public class MainGraphSseController {
             }
         }
 
+        // B3-c: 在删旧 assistant 前读出 cache_key, 用于后续 regenerate 负反馈打分.
+        // 必须在 deleteById 之前读 — 删除后无法再 select.
+        String oldCacheKey = assistantMsg.getCacheKey();
+
         // 物理删除老 assistant 消息. 注意: chat_message 表无 deleted 字段 (无软删约定).
         chatMessageMapper.deleteById(assistantMessageId);
 
@@ -634,6 +781,7 @@ public class MainGraphSseController {
         ctx.userMessageId = userMsg.getId();
         ctx.userContent = userMsg.getContent();
         ctx.userImageUrls = imageUrls;
+        ctx.oldCacheKey = oldCacheKey;
         return ctx;
     }
 
@@ -645,6 +793,13 @@ public class MainGraphSseController {
         Long userMessageId;
         String userContent;
         List<String> userImageUrls;
+        /**
+         * 被删除的旧 assistant 消息的 cache_key (B3-c 新增).
+         * <p>非空 = 老答案是缓存关联的 (要么命中缓存产生, 要么命中后被写入缓存).
+         * 用于在跑 Graph 前给该 cacheKey 累加 regenerate 负反馈分.</p>
+         * <p>null = 老答案没绑缓存 (chitchat/admin/未缓存意图), 无 cacheKey 可惩罚, 直接跳过.</p>
+         */
+        String oldCacheKey;
     }
 
     // ==================== 通用 ====================

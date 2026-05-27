@@ -1,5 +1,8 @@
 package com.wzh.agentdemo.mcp.tool;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.wzh.agentdemo.mcp.client.MainAppClient;
 import com.wzh.agentdemo.mcp.client.TicketSystemClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +26,10 @@ import org.springframework.stereotype.Component;
 public class TicketTools {
 
     private final TicketSystemClient ticketSystemClient;
+    /** B5: 工单按钮场景下回填 main 端 DB (写 submitted_ticket_id + 累加 cacheKey 负反馈分) */
+    private final MainAppClient mainAppClient;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @McpTool(
             name = "submitTicket",
@@ -52,12 +59,35 @@ public class TicketTools {
         String featureName     = getString(meta, "featureName", "通用FAQ");
         // 第五刀 Batch 2:完整对话历史 JSON,供工单详情页"对话历史"卡片渲染
         String chatHistoryJson = getString(meta, "chatHistoryJson", "[]");
+        // B5: 工单按钮场景下由 main 端 TicketAgentNode 透传; 普通对话提工单为 0 (= null 语义)
+        Long   ticketButtonTriggeredBy = getLong(meta, "ticketButtonTriggeredBy", 0L);
 
-        log.info("[MCP Tool] submitTicket title={}, userId={}, sessionId={}, feature={}, historyLen={}",
-                title, userId, sessionId, featureName, chatHistoryJson.length());
+        log.info("[MCP Tool] submitTicket title={}, userId={}, sessionId={}, feature={}, historyLen={}, triggeredBy={}",
+                title, userId, sessionId, featureName, chatHistoryJson.length(),
+                ticketButtonTriggeredBy == 0L ? "null" : ticketButtonTriggeredBy);
 
-        return ticketSystemClient.submitTicket(
+        // Step 1: 调 TicketSystem 创建工单. 返回的是 TicketSystem 的 Result<Map> 结构 JSON 字符串.
+        String responseJson = ticketSystemClient.submitTicket(
                 title, description, priority, userId, userName, sessionId, featureName, chatHistoryJson);
+
+        // Step 2: B5 工单按钮回填 — 仅当按钮触发场景且工单提交成功时回调 main 端.
+        // 设计动机: 工单成功的事实 (code=200 + ticketNo 非空) 在 TicketSystem 响应这一刻就已确定,
+        // 直接由 MCP 同步回调 main 写库, 不依赖 LLM 答复文本里抠工单号. 这让 LLM 和事实层完全解耦.
+        if (ticketButtonTriggeredBy != 0L) {
+            String ticketNo = extractTicketNoIfSuccess(responseJson);
+            if (ticketNo != null) {
+                // 同步阻塞调用. 局域网 RTT < 50ms, 收益是 LLM 答复"已提交工单"时 DB 状态已一致.
+                // callback 失败 (网络/main 异常) 不影响本函数返回给 LLM 的工具结果,
+                // main 端 handleDone 兜底回滚 SUBMITTING 占位.
+                mainAppClient.notifyTicketCallback(ticketButtonTriggeredBy, ticketNo);
+            } else {
+                log.warn("[MCP Tool] submitTicket 按钮场景但响应中未解析到 ticketNo, 跳过 callback. response={}",
+                        responseJson);
+            }
+        }
+
+        // Step 3: 不管 callback 成功失败, 都把原始 TicketSystem 响应返给 LLM, 让 LLM 自然语言告知用户.
+        return responseJson;
     }
 
     @McpTool(
@@ -76,6 +106,42 @@ public class TicketTools {
     }
 
     // ==================== 辅助方法 ====================
+
+    /**
+     * 解析 TicketSystem 返回的 JSON, 提取工单号. 仅在 code=200 且 data.ticketNo 非空时返回工单号,
+     * 否则返回 null (调用方应跳过 callback).
+     *
+     * <p>TicketSystem 响应结构:
+     * <pre>
+     * {"code":200,"message":"success","data":{
+     *   "ticketNo":"TK-20260526-0001",
+     *   "ticketId":12,
+     *   "status":"PENDING",
+     *   "message":"工单已提交..."
+     * }}
+     * </pre>
+     *
+     * <p>异常路径: ticketSystemClient 会在 HTTP 非 2xx / 网络异常时返回
+     * {@code {"success":false,"message":"..."}} 自造 JSON, 此时 root.code 字段不存在,
+     * 本方法返回 null 兜底.</p>
+     */
+    private String extractTicketNoIfSuccess(String responseJson) {
+        if (responseJson == null || responseJson.isBlank()) return null;
+        try {
+            JsonNode root = objectMapper.readTree(responseJson);
+            JsonNode codeNode = root.get("code");
+            if (codeNode == null || codeNode.asInt() != 200) return null;
+            JsonNode data = root.get("data");
+            if (data == null || data.isNull()) return null;
+            JsonNode ticketNoNode = data.get("ticketNo");
+            if (ticketNoNode == null || ticketNoNode.isNull()) return null;
+            String ticketNo = ticketNoNode.asText();
+            return (ticketNo == null || ticketNo.isBlank()) ? null : ticketNo;
+        } catch (Exception e) {
+            log.warn("[MCP Tool] 解析 TicketSystem 响应 ticketNo 失败, response={}", responseJson, e);
+            return null;
+        }
+    }
 
     private String getString(McpMeta meta, String key, String defaultValue) {
         if (meta == null) return defaultValue;

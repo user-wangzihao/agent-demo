@@ -66,9 +66,43 @@ public class CacheCheckNode extends AbstractGraphNode {
     protected Map<String, Object> doApply(OverAllState state) {
         Map<String, Object> partial = new HashMap<>();
 
+        // ============ 状态残留防御 (B3-c hotfix) ============
+        // 跟 phaseLog/PHASE_LATENCIES 同样的 CompiledGraph 单例陷阱:
+        // OverAllState 跨调用复用 + ReplaceStrategy 只在"有新值时"才替换 →
+        // 上一次命中写入的 CACHE_HIT_KEY/LAYER 在本次 MISS 时会残留, 导致
+        // routeAfterCacheCheck 误判 HIT → 跳 finalize → 老答案被原样返回.
+        //
+        // 实测场景: 同一个 sessionId 先命中后未命中, 或者 regenerate / disabled /
+        // feature 解析失败等所有 MISS 分支都会触发. B3-a 引入 cache_check 时未处理,
+        // B3-c 验证 regenerate 时才暴露.
+        //
+        // 修法: 顶部无条件清空, 命中分支后面 put 真值会覆盖 (Map.put 后写赢).
+        // 用空串而非 null 是因为 ReplaceStrategy 对 Optional.of(null) 与
+        // Optional.empty() 的行为在 Graph 1.1.2 下未经验证; 空串是明确的非 null
+        // 且 routeAfterCacheCheck 已用 !isBlank() 判 MISS, 语义对齐.
+        partial.put(GraphStateKeys.CACHE_HIT_KEY, "");
+        partial.put(GraphStateKeys.CACHE_HIT_LAYER, "");
+
         // 总开关
         if (!properties.isEnabled()) {
             appendPhaseLog(state, partial, "[" + NODE_ID + "] disabled, skip");
+            return partial;
+        }
+
+        // ============ B3-c: regenerate 强制 MISS ============
+        // 用户点了"重新生成"按钮 = 显式拒绝上一次答案. 此时若再次走 L1/L2 命中, 只会原样返回
+        // 用户刚拒绝的回答, 体验是死循环. 直接跳过查询走完整 RAG 重算.
+        //
+        // 注意: 此处只跳查询, 不写 MATCHED_FEATURE. 让后续 FeatureResolveNode 重新解析,
+        // 与正常未命中分支保持一致 (避免 cache_check 写入 MATCHED_FEATURE 让 FeatureResolveNode
+        // 跳过解析, 进而影响后续节点对 feature 的判断).
+        //
+        // 负反馈打分 (regenerate 给老 cacheKey 加 -1) 由 Controller 在跑 Graph 前处理,
+        // 不在此节点处理. 设计动机: 负反馈是"用户对老答案投不信任票"的事实即时确定,
+        // 与 Graph 是否成功生成新答案独立; 放 Controller 避免节点产生外部副作用.
+        if (RouteUtil.safeBool(state, GraphStateKeys.IS_REGENERATE, false)) {
+            appendPhaseLog(state, partial, "[" + NODE_ID + "] regenerate → force MISS, skip lookup");
+            log.info("[{}] regenerate detected → skip cache lookup, proceed to RAG", NODE_ID);
             return partial;
         }
 

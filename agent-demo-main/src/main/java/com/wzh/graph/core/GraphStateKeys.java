@@ -113,6 +113,51 @@ public final class GraphStateKeys {
      */
     public static final String CACHE_HIT_LAYER = "cacheHitLayer";
 
+    /**
+     * 当前调用是否来自"重新生成"按钮 (Boolean; 缺省=false).
+     *
+     * <p><b>由 Controller 写入 initial state</b>: regenerate 分支才 put true, 普通对话不传.</p>
+     *
+     * <p><b>由 CacheCheckNode 读取</b>: true 时强制 MISS, 不走 L1/L2 查询. 设计动机:
+     * 用户点"重新生成"= 显式拒绝了上一次答案 (无论该答案是 RAG 新生成还是缓存命中). 此时若
+     * 再次命中同一缓存只会原样返回老答案, 等于把用户钉死在他刚拒绝的回答上.</p>
+     *
+     * <p><b>handleDone 的写缓存判定独立处理 isRegenerate</b>, 此 state key 仅用于 CacheCheckNode
+     * 跳过查询; 写缓存判定见 {@code handleDone} 中的 {@code shouldCacheWrite} 条件.</p>
+     */
+    public static final String IS_REGENERATE = "isRegenerate";
+
+    /**
+     * B5: 工单按钮场景标记 — 老 assistant 消息 id (Long).
+     *
+     * <p><b>由 Controller 写入 initial state</b>: 按钮端点 {@code /api/agent/submit-ticket-for-message}
+     * 入口处, 把前端传来的 targetAssistantMessageId 放进 state. 普通对话 (chatStream) 不传, 不放.</p>
+     *
+     * <p><b>由 TicketAgentNode 读取</b>: 在 {@code buildToolContext} 里塞进 toolContext map,
+     * 透传给 MCP {@code submitTicket} 工具的 McpMeta. MCP 端工单创建成功后, 把这个 id 当作
+     * "应该被回填 submitted_ticket_id 的消息 id"传给 main 的 {@code /internal/ticket/callback}.</p>
+     *
+     * <p><b>跟 isRegenerate 一样独立的 state 字段</b>, 因为按钮场景下:
+     * <ul>
+     *   <li>cache_check 应正常跑 (新 query "提交工单" 会 MISS, 走 RAG 后到 ticket_agent)</li>
+     *   <li>cache-write 应跳过 (ticket 答复不应进缓存; 跟 IS_TICKET_RESPONSE 配合)</li>
+     *   <li>负反馈不在跑 Graph 前打 (跟 regenerate 不同: 工单成功的事实只有 MCP 回调时才确定)</li>
+     * </ul></p>
+     */
+    public static final String TICKET_BUTTON_TRIGGERED_BY = "ticketButtonTriggeredBy";
+
+    /**
+     * B5: 工单 Agent 响应标记 (Boolean).
+     *
+     * <p><b>由 TicketAgentNode 写入</b>: 节点执行完毕时 partial 里 put true,
+     * 表示本轮响应是工单 Agent 生成的 (含"已为您提交工单 TK-xxx"/"提交失败"等).</p>
+     *
+     * <p><b>由 Controller handleDone 读取</b>: cache-write 判定加 {@code !isTicketResponse} 条件,
+     * 工单结果不进语义缓存. 这同时覆盖了对话工单和按钮工单两种场景, 是借 B5 顺手修的存量 bug:
+     * 之前对话工单的"已为您提交工单 TK-xxx"会被错误写入缓存, 下次同 query 命中会返回老工单号.</p>
+     */
+    public static final String IS_TICKET_RESPONSE = "isTicketResponse";
+
     private GraphStateKeys() {
         // 禁止实例化
     }
