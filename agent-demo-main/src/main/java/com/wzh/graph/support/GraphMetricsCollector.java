@@ -45,6 +45,9 @@ import java.util.Map;
  *   <li><b>LLM token 消耗</b> ({@link #recordLlmTokens}):
  *       Counter, 维度 {@code model} + {@code scene} + {@code intent} + {@code token_type}.
  *       覆盖主对话/意图分类/改写/图像理解全场景.</li>
+ *   <li><b>语义缓存</b> (B6, {@link #recordCacheHit} / {@link #recordCacheMiss} / {@link #recordCacheDegraded}):
+ *       Counter, hit 维度 {@code layer} (L1/L2), miss/degraded 无标签. 故意不暴露 feature_name
+ *       (700+ feature 会导致基数爆炸), 按 feature 维度走 SQL 直查.</li>
  * </ol>
  *
  * <h2>标签基数控制</h2>
@@ -258,6 +261,75 @@ public class GraphMetricsCollector {
             log.warn("[GraphMetricsCollector] recordLlmTokens failed model={} scene={} intent={} " +
                             "promptTokens={} completionTokens={}",
                     model, scene, intentCode, promptTokens, completionTokens, e);
+        }
+    }
+
+    // ==================== D. 语义缓存 (第3刀 B6) ====================
+    //
+    // 设计要点 — feature_name 故意不作为标签:
+    //
+    // 业务侧 feature 数量在 700+ 量级 (并随业务持续增长). 如果按 feature 拆分 Counter,
+    // 仅 cache hit/miss/degraded 3 个指标就会产生 700×4 = 2800+ 时序,
+    // Grafana 渲染卡 / PromQL 聚合开销大 / 稀疏时序污染.
+    //
+    // 解决: Prometheus 走"热路径轻量化", 只埋全局聚合 (4 个时序) 用于 SLO 告警和大屏命中率卡.
+    // 按 feature 维度的细粒度分析走"冷路径", 调 SemanticCacheService 直接 SQL 聚合
+    // (semantic_cache 表本身已有 hit_count / feedback_score / status 字段, 数据更精确).
+    // 这是 high-cardinality 处理的标准实践 — 跟 Datadog/New Relic 的建议对齐.
+
+    /** Cache 命中层级标签常量, 跟 SemanticCacheService.CacheLookupResult.hitLayer 对齐. */
+    public static final String CACHE_LAYER_L1 = "L1";
+    public static final String CACHE_LAYER_L2 = "L2";
+
+    /**
+     * 记录一次缓存命中.
+     *
+     * @param layer L1 (Redis 字面命中) / L2 (Milvus 语义命中). 由 CacheCheckNode 在命中分支调用.
+     */
+    public void recordCacheHit(String layer) {
+        try {
+            Counter.builder("agent_cache_hit_total")
+                    .description("语义缓存命中次数, 按 L1/L2 拆分")
+                    .tag("layer", safeTag(layer == null ? "unknown" : layer))
+                    .register(meterRegistry)
+                    .increment();
+        } catch (Exception e) {
+            log.warn("[GraphMetricsCollector] recordCacheHit failed layer={}", layer, e);
+        }
+    }
+
+    /**
+     * 记录一次缓存未命中 (CacheCheckNode 完整跑过 L1 + L2 都没命中, 即将走 RAG).
+     *
+     * <p>注意: CacheCheckNode 的"早退分支"(disabled / regenerate / featureName 空) 不计为 miss,
+     * 因为它们根本没真正执行 lookup. miss 的语义是"查询了但没找到", 区分这两类对命中率统计很重要.</p>
+     */
+    public void recordCacheMiss() {
+        try {
+            Counter.builder("agent_cache_miss_total")
+                    .description("语义缓存未命中次数 (lookup 真正执行后返回 null)")
+                    .register(meterRegistry)
+                    .increment();
+        } catch (Exception e) {
+            log.warn("[GraphMetricsCollector] recordCacheMiss failed", e);
+        }
+    }
+
+    /**
+     * 记录一次缓存条目被降级 (status: ACTIVE → DEGRADED), 由 SemanticCacheService.incrementFeedback
+     * 在 feedback_score 达阈值时调用.
+     *
+     * <p>反映"哪些 feature 答案质量差"的早期信号: degraded_total 上涨快 = 用户连续吐槽某些答案,
+     * 应该回查这些 feature 的文档/FAQ 质量.</p>
+     */
+    public void recordCacheDegraded() {
+        try {
+            Counter.builder("agent_cache_degraded_total")
+                    .description("语义缓存条目被降级次数 (feedback_score 触阈)")
+                    .register(meterRegistry)
+                    .increment();
+        } catch (Exception e) {
+            log.warn("[GraphMetricsCollector] recordCacheDegraded failed", e);
         }
     }
 

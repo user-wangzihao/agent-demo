@@ -21,8 +21,11 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 语义缓存对外门面 (第3刀).
@@ -58,6 +61,13 @@ public class SemanticCacheService {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    /**
+     * B6: degrade 事件埋点. 不暴露 feature_name 标签 (高基数), 仅做全局计数.
+     * 按 feature 的 degrade 分布走 SQL 直查 semantic_cache 表 status=DEGRADED 的行.
+     */
+    @Autowired
+    private com.wzh.graph.support.GraphMetricsCollector graphMetricsCollector;
 
     // ==================== 公共 API ====================
 
@@ -247,6 +257,70 @@ public class SemanticCacheService {
         }
     }
 
+    /**
+     * 按 feature 维度聚合缓存条目, 供大屏"缓存详情"表格展示 (B6 方案 D 冷路径).
+     *
+     * <p><b>设计动机</b>: Prometheus 不暴露 feature_name 标签 (700+ feature 会导致基数爆炸,
+     * 详见 GraphMetricsCollector D 节注释). 按 feature 的细粒度分析走 SQL 直查,
+     * 因为 semantic_cache 表本身已经有 hit_count / feedback_score / status 字段,
+     * 数据比 Prometheus 时序还精确 (Prometheus 重启会丢历史 Counter).</p>
+     *
+     * <p><b>实现策略</b>: 全表 SELECT + 内存 group by. 选这个而非自定义 SQL GROUP BY 的原因:
+     * <ul>
+     *   <li>改动收敛在 main 模块, 不动 common 模块的 SemanticCacheMapper</li>
+     *   <li>demo / 中型企业量级 (< 5000 条) 性能完全足够, 毫秒级</li>
+     *   <li>未来超大规模再换自定义 SQL, 接口契约不变</li>
+     * </ul></p>
+     *
+     * @return 按 totalHits DESC 排序的 list, 空表返回空 list 而非 null
+     */
+    public List<CacheFeatureStat> aggregateByFeature() {
+        if (!properties.isEnabled()) return List.of();
+        try {
+            List<SemanticCache> all = semanticCacheMapper.selectList(null);
+            if (all == null || all.isEmpty()) return List.of();
+
+            // 按 featureName 分组聚合
+            Map<String, List<SemanticCache>> grouped = all.stream()
+                    .filter(r -> r.getFeatureName() != null && !r.getFeatureName().isBlank())
+                    .collect(Collectors.groupingBy(SemanticCache::getFeatureName));
+
+            return grouped.entrySet().stream()
+                    .map(e -> buildStat(e.getKey(), e.getValue()))
+                    .sorted(Comparator.comparingLong(CacheFeatureStat::getTotalHits).reversed())
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            log.warn("[SemanticCache] aggregateByFeature failed", e);
+            return List.of();
+        }
+    }
+
+    /** 把同 featureName 的 rows 聚合成 CacheFeatureStat. */
+    private CacheFeatureStat buildStat(String featureName, List<SemanticCache> rows) {
+        CacheFeatureStat stat = new CacheFeatureStat();
+        stat.setFeatureName(featureName);
+        stat.setTotalEntries(rows.size());
+        long totalHits = 0;
+        long totalFeedback = 0;
+        int activeCount = 0;
+        int degradedCount = 0;
+        int invalidCount = 0;
+        for (SemanticCache r : rows) {
+            if (r.getHitCount() != null) totalHits += r.getHitCount();
+            if (r.getFeedbackScore() != null) totalFeedback += r.getFeedbackScore();
+            String s = r.getStatus();
+            if (CacheStatus.ACTIVE.equals(s)) activeCount++;
+            else if (CacheStatus.DEGRADED.equals(s)) degradedCount++;
+            else if (CacheStatus.INVALID.equals(s)) invalidCount++;
+        }
+        stat.setTotalHits(totalHits);
+        stat.setTotalFeedbackScore(totalFeedback);
+        stat.setActiveCount(activeCount);
+        stat.setDegradedCount(degradedCount);
+        stat.setInvalidCount(invalidCount);
+        return stat;
+    }
+
     // ==================== 内部 ====================
 
     /** 校验 MySQL 中 status 是否 ACTIVE. 非 ACTIVE (DEGRADED/INVALID) 返回 false. */
@@ -293,6 +367,9 @@ public class SemanticCacheService {
             redisTemplate.delete(REDIS_KEY_PREFIX + cacheKey);
             milvusService.deleteByCacheKey(cacheKey);
             log.info("[SemanticCache] degraded cacheKey={}", cacheKey);
+            // B6: degrade 埋点. 放在 catch 外的"全部三件存储动作成功后", 避免 Redis 删失败
+            // 但 MySQL 已置 DEGRADED 的中间态被多计 (但这场景不会发生, 因为整个 try 块走完才算 ok).
+            graphMetricsCollector.recordCacheDegraded();
         } catch (Exception e) {
             log.warn("[SemanticCache] degrade failed cacheKey={}", cacheKey, e);
         }
@@ -407,5 +484,26 @@ public class SemanticCacheService {
         public static CacheLookupResult hitL2(String key, CacheEntry e, double sim) {
             return new CacheLookupResult(true, "L2", key, e, sim);
         }
+    }
+
+    /**
+     * 按 feature 聚合统计 (B6 方案 D). 大屏"缓存详情"表格的行数据.
+     */
+    @Data
+    public static class CacheFeatureStat {
+        /** 功能名 (= semantic_cache.feature_name) */
+        private String featureName;
+        /** 该 feature 名下的缓存条目总数 (含 ACTIVE/DEGRADED/INVALID 所有状态) */
+        private int totalEntries;
+        /** 累计命中次数 = SUM(hit_count). 反映该 feature 被复用程度. */
+        private long totalHits;
+        /** 累计负反馈分 = SUM(feedback_score). 高值 = 答案质量差. */
+        private long totalFeedbackScore;
+        /** status=ACTIVE 的条目数 (可被命中) */
+        private int activeCount;
+        /** status=DEGRADED 的条目数 (反馈触阈被降级, 已清 Redis+Milvus 等待复活) */
+        private int degradedCount;
+        /** status=INVALID 的条目数 (重学/删除触发的失效, 等待 03:00 定时任务清理) */
+        private int invalidCount;
     }
 }

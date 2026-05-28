@@ -100,6 +100,32 @@ public class KpiSnapshot {
     /** 今日 (00:00 ~ now) ticket_system 创建的工单数. */
     private long todayTicketCount;
 
+    // ==================== 卡 6: 语义缓存命中率 (B6, 来自 Prometheus) ====================
+
+    /**
+     * 缓存总命中率 (24h, 0-100 百分比).
+     * 计算: sum(hit) / (sum(hit) + sum(miss)) * 100, 时间窗口 24h.
+     * PromQL: sum(increase(agent_cache_hit_total[24h])) /
+     *         (sum(increase(agent_cache_hit_total[24h])) + sum(increase(agent_cache_miss_total[24h]))) * 100
+     * 没数据 (24h 内既无 hit 也无 miss) 返回 0.
+     */
+    private double cacheHitRate;
+
+    /**
+     * 24h 内 L1 命中数 (Redis 字面命中). 用作副数字展示, 帮助理解 L1/L2 分布.
+     */
+    private long cacheHitL1Count;
+
+    /**
+     * 24h 内 L2 命中数 (Milvus 语义命中).
+     */
+    private long cacheHitL2Count;
+
+    /**
+     * 24h 内未命中数. cacheHitRate 分母 = L1 + L2 + miss.
+     */
+    private long cacheMissCount;
+
     // ==================== 元数据 ====================
 
     /** 本次快照生成时刻 (服务端时间). 前端可据此显示"上次更新于 X 秒前". */

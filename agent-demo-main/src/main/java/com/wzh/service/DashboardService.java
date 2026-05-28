@@ -138,6 +138,26 @@ public class DashboardService {
         builder.topTokenScene(topScene);
         builder.topTokenScenePercent(topScenePercent);
 
+        // ==================== 卡 6: 缓存命中率 (B6) ====================
+        // 故意拆成 3 个 scalar 查 (而不是一次 PromQL 算好 hitRate), 因为前端副数字要展示
+        // L1/L2 分布. 拆开后端组装, 比合并查询更清晰.
+        Double cacheHitL1 = prometheus.queryScalar(
+                "sum(increase(agent_cache_hit_total{layer=\"L1\"}[24h]))");
+        Double cacheHitL2 = prometheus.queryScalar(
+                "sum(increase(agent_cache_hit_total{layer=\"L2\"}[24h]))");
+        Double cacheMiss = prometheus.queryScalar(
+                "sum(increase(agent_cache_miss_total[24h]))");
+        long l1 = cacheHitL1 == null ? 0L : cacheHitL1.longValue();
+        long l2 = cacheHitL2 == null ? 0L : cacheHitL2.longValue();
+        long miss = cacheMiss == null ? 0L : cacheMiss.longValue();
+        long totalLookup = l1 + l2 + miss;
+        double cacheHitRate = totalLookup == 0 ? 0.0
+                : round2(((double) (l1 + l2)) * 100.0 / totalLookup);
+        builder.cacheHitL1Count(l1);
+        builder.cacheHitL2Count(l2);
+        builder.cacheMissCount(miss);
+        builder.cacheHitRate(cacheHitRate);
+
         long promMs = System.currentTimeMillis() - promStart;
         debug.put("prometheus", promMs);
         debug.put("total", System.currentTimeMillis() - start);
@@ -145,11 +165,13 @@ public class DashboardService {
 
         KpiSnapshot snapshot = builder.build();
         log.info("[DASHBOARD-KPI] generated. chats={} users={} hit={}% tokens={} topScene={}({}%) " +
-                        "pending={} tickets={} mysqlMs={} promMs={} totalMs={}",
+                        "pending={} tickets={} cacheHit={}%(L1={}+L2={} miss={}) mysqlMs={} promMs={} totalMs={}",
                 snapshot.getTodayChatCount(), snapshot.getTodayActiveUserCount(),
                 snapshot.getFaqHitRate(), snapshot.getTodayTokenTotal(),
                 snapshot.getTopTokenScene(), snapshot.getTopTokenScenePercent(),
                 snapshot.getFaqCandidatePending(), snapshot.getTodayTicketCount(),
+                snapshot.getCacheHitRate(), snapshot.getCacheHitL1Count(),
+                snapshot.getCacheHitL2Count(), snapshot.getCacheMissCount(),
                 mysqlMs, promMs, debug.get("total"));
         return snapshot;
     }

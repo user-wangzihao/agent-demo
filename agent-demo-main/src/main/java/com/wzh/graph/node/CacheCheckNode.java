@@ -56,6 +56,8 @@ public class CacheCheckNode extends AbstractGraphNode {
     private final SemanticCacheService cacheService;
     private final SemanticCacheProperties properties;
     private final ProductionRetrieveService productionRetrieveService;
+    /** B6: cache hit/miss 埋点. 故意不暴露 feature_name 标签, 看 GraphMetricsCollector D 节注释. */
+    private final com.wzh.graph.support.GraphMetricsCollector graphMetricsCollector;
 
     @Override
     protected String nodeId() {
@@ -142,6 +144,9 @@ public class CacheCheckNode extends AbstractGraphNode {
                     NODE_ID, featureName, intent.getCode());
             appendPhaseLog(state, partial,
                     "[" + NODE_ID + "] feature=" + featureName + " intent=" + intent.getCode() + " → MISS");
+            // B6: 真正执行了 lookup 但没命中, 记 miss. 上面 4 个早退分支 (disabled/regenerate/
+            // feature 解析失败/featureName 空) 不计 miss, 因为没真正查询缓存, 语义不同.
+            graphMetricsCollector.recordCacheMiss();
             return partial;
         }
 
@@ -168,6 +173,8 @@ public class CacheCheckNode extends AbstractGraphNode {
                         + " key=" + result.getCacheKey()
                         + " feature=" + featureName
                         + " intent=" + intent.getCode());
+        // B6: 命中打点, 按 L1/L2 layer 拆分.
+        graphMetricsCollector.recordCacheHit(result.getHitLayer());
         return partial;
     }
 
