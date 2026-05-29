@@ -211,6 +211,12 @@ public class MainGraphSseController {
         // 避免 CompiledGraph 单例跨调用复用 OverAllState 导致 phaseLog 累加.
         initial.put(GraphStateKeys.PHASE_LOG, new ArrayList<String>());
         initial.put(GraphStateKeys.PHASE_LATENCIES, new HashMap<String, Long>());
+        // Self-RAG 收尾 hotfix: 显式重置 MATCHED_FEATURE, 与 PHASE_LOG 同一道入口防线.
+        // CompiledGraph 单例 OverAllState 跨请求复用, 若不在入口清零, 上一次请求残留的
+        // matchedFeature 会穿透到本次 cache_check/feature_resolve (尤其当本次问的是库中不存在的
+        // 功能、解析结果为 null 时). 空串 + 下游 isBlank() 判定, 让节点据此重新解析或走 fallback.
+        // 这是双保险: CacheCheckNode 顶部也做了同样重置, 两处共同堵住残留污染.
+        initial.put(GraphStateKeys.MATCHED_FEATURE, "");
         // B3-c: regenerate 标记, CacheCheckNode 据此跳过 L1/L2 查询走完整 RAG.
         // 仅 regenerate 分支才显式 put true; 普通对话不传, CacheCheckNode 走 safeBool 兜底 false.
         // 显式 put 比依赖 state 残留更鲁棒 — 即使 OverAllState 跨调用复用, 本字段每次都被本请求覆盖.
@@ -290,6 +296,30 @@ public class MainGraphSseController {
                                 }
                             }
 
+                            // Self-RAG: knowledge_answer 完成 → 捕获 FINAL_ANSWER + SELF_RAG_SKIP_CACHE.
+                            //
+                            // 关键: knowledge 路径自 Self-RAG 起改为"同步生成 + best-of-2 择优", 节点内不再
+                            // 推流 (sink=NOOP), 故 fullAnswer (靠流式 onToken 累积) 在该路径下为空.
+                            // 最终答案落在 FINAL_ANSWER state key 里, 必须在此捕获, doOnComplete 优先采用它,
+                            // 否则 assistant 消息落库内容为空、缓存也写不进去.
+                            //
+                            // chitchat / ticket / admin 仍是流式 (fullAnswer 有值), 不捕获 finalAnswer,
+                            // doOnComplete 回退用 fullAnswer.toString() — 两条路径并存互不干扰.
+                            if ("knowledge_answer".equals(no.node())) {
+                                String finalAns = RouteUtil.safeString(no.state(),
+                                        GraphStateKeys.FINAL_ANSWER, null);
+                                if (finalAns != null && !finalAns.isBlank()) {
+                                    outboundCapture.put("knowledgeFinalAnswer", finalAns);
+                                }
+                                boolean skipCache = RouteUtil.safeBool(no.state(),
+                                        GraphStateKeys.SELF_RAG_SKIP_CACHE, false);
+                                outboundCapture.put("selfRagSkipCache", skipCache);
+                                String verdict = RouteUtil.safeString(no.state(),
+                                        GraphStateKeys.SELF_RAG_VERDICT, null);
+                                log.debug("[DEBUG] captured knowledge_answer finalAnsLen={} skipCache={} verdict={}",
+                                        finalAns == null ? 0 : finalAns.length(), skipCache, verdict);
+                            }
+
                             // intent 完成 → 若 chitchat / admin_command 短路立即推空 meta
                             // (这两类不经过 merger, 否则前端会等不到 meta)
                             if ("intent".equals(no.node()) && !metaEmitted.get()) {
@@ -362,14 +392,36 @@ public class MainGraphSseController {
                             // B5: ticket_agent 节点完成时被设为 true; 普通流量为 null/false.
                             Boolean finalIsTicketResponseBoxed = (Boolean) outboundCapture.get("isTicketResponse");
                             boolean finalIsTicketResponse = Boolean.TRUE.equals(finalIsTicketResponseBoxed);
+
+                            // Self-RAG: 决定本轮最终答案内容.
+                            // - knowledge 路径 (同步生成): 用捕获的 FINAL_ANSWER
+                            // - chitchat/ticket/admin (流式): 回退用 fullAnswer 累积值
+                            String knowledgeFinalAnswer = (String) outboundCapture.get("knowledgeFinalAnswer");
+                            String finalContent = (knowledgeFinalAnswer != null && !knowledgeFinalAnswer.isBlank())
+                                    ? knowledgeFinalAnswer
+                                    : fullAnswer.toString();
+                            Boolean skipCacheBoxed = (Boolean) outboundCapture.get("selfRagSkipCache");
+                            boolean finalSelfRagSkipCache = Boolean.TRUE.equals(skipCacheBoxed);
+
+                            // Self-RAG: knowledge 路径同步生成不推流, 此处用 replay 事件把整段答案推给前端.
+                            // 当前阶段前端一次性显示 (无打字机); 前端 Batch 会把 replay 改为逐字定时播放,
+                            // 实现"模拟流式", 后端无需再改. chitchat 等流式路径已通过 token 事件推完, 不重复推.
+                            if (knowledgeFinalAnswer != null && !knowledgeFinalAnswer.isBlank()) {
+                                try {
+                                    emitter.send(SseEmitter.event().name("replay").data(knowledgeFinalAnswer));
+                                } catch (Exception e) {
+                                    log.warn("SSE replay 发送失败", e);
+                                }
+                            }
+
                             log.debug("[DEBUG doOnComplete] finalIntent={} finalFeature='{}' "
-                                            + "cacheHitKey={} cacheHitLayer={} isTicket={} holder={}",
+                                            + "cacheHitKey={} cacheHitLayer={} isTicket={} skipCache={} holder={}",
                                     finalIntent, finalFeature, finalCacheHitKey, finalCacheHitLayer,
-                                    finalIsTicketResponse, outboundCapture);
+                                    finalIsTicketResponse, finalSelfRagSkipCache, outboundCapture);
 
                             handleDone(
                                     emitter, sessionId,
-                                    fullAnswer.toString(),
+                                    finalContent,
                                     capturedImages[0],
                                     capturedSources[0],
                                     history.size(),
@@ -380,6 +432,7 @@ public class MainGraphSseController {
                                     finalCacheHitLayer,
                                     regenerateFromMessageId != null,
                                     finalIsTicketResponse,
+                                    finalSelfRagSkipCache,
                                     ticketButtonTriggeredBy);
                         })
                         .doOnError(err -> handleError(
@@ -438,6 +491,7 @@ public class MainGraphSseController {
                             String cacheHitLayer,
                             boolean isRegenerate,
                             boolean isTicketResponse,
+                            boolean selfRagSkipCache,
                             Long ticketButtonTriggeredBy) {
         try {
             // 临时 DEBUG: 看 handleDone 收到的 intent / matchedFeature 真实值
@@ -519,10 +573,15 @@ public class MainGraphSseController {
             // B5: 加 !isTicketResponse 排除工单流量. 任何走到 ticket_agent 的响应 ("已为您提交工单 TK-xxx"
             // / "提交失败...") 都不应该进语义缓存 — 下次同 query 命中会返回过时的工单号原文,
             // 或者把 LLM 编造的 fake 工单号传染开来. 同时覆盖对话工单和按钮工单两种触发场景.
+            // Self-RAG: 加 !selfRagSkipCache 排除假问题兜底话术. 当 Self-RAG 判定两版答案都不合格
+            // (winner_acceptable=false), FINAL_ANSWER 被置为"没找到相关信息"的兜底话术, 此时
+            // selfRagSkipCache=true. 兜底话术绝不能进缓存 — 否则下次同 query 命中会把"没找到"固化返回,
+            // 与 B4 失效策略、命中即"已 PASS 答案"的缓存语义直接冲突. 这是 Self-RAG 假问题防御的闭环.
             boolean shouldCacheWrite =
                     cacheHitKey == null
                             && !isRegenerate
                             && !isTicketResponse
+                            && !selfRagSkipCache
                             && matchedFeature != null && !matchedFeature.isBlank()
                             && isCacheableIntent(intent)
                             && fullContent != null && !fullContent.isBlank();
@@ -555,8 +614,8 @@ public class MainGraphSseController {
                     log.warn("[cache-write] failed assistantMsgId={}", msg.getId(), e);
                 }
             } else {
-                log.info("[cache-write] skip: hit={} regen={} ticket={} feature='{}' intent={} faqHit={} contentLen={}",
-                        cacheHitKey != null, isRegenerate, isTicketResponse, matchedFeature,
+                log.info("[cache-write] skip: hit={} regen={} ticket={} skipCache={} feature='{}' intent={} faqHit={} contentLen={}",
+                        cacheHitKey != null, isRegenerate, isTicketResponse, selfRagSkipCache, matchedFeature,
                         intent == null ? null : intent.getCode(), faqHit,
                         fullContent == null ? 0 : fullContent.length());
             }

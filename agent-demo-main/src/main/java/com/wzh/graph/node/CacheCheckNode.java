@@ -85,6 +85,26 @@ public class CacheCheckNode extends AbstractGraphNode {
         partial.put(GraphStateKeys.CACHE_HIT_KEY, "");
         partial.put(GraphStateKeys.CACHE_HIT_LAYER, "");
 
+        // ============ 状态残留防御 (Self-RAG 收尾 hotfix): MATCHED_FEATURE ============
+        // 与上面 CACHE_HIT_KEY 同根的 CompiledGraph 单例陷阱, 但更隐蔽、危害更大:
+        //
+        // 现象: 用户问库中不存在的功能 (如"滑块底座"), cache_check 自己解析得 feature=null
+        // 走 MISS 早退分支 → 本节点不 put MATCHED_FEATURE → ReplaceStrategy "无新值保留旧值"
+        // → 上一次请求残留的 MATCHED_FEATURE (如"建模档合并订料") 穿透到 feature_resolve
+        // → feature_resolve 第 44 行检测到"已有值"直接 reused, 跳过自己的解析
+        // → 不存在的知识被错误绑定到一个无关 feature, 污染该 feature 的缓存/检索.
+        //
+        // 这就是"feature=null → MISS" 与 "feature_resolve reused matched=建模档合并订料"
+        // 同时出现在一条日志里的根因 (cache_check 算出 null, 但下游读到了残留的非 null 值).
+        //
+        // 修法: 顶部无条件清空 MATCHED_FEATURE. 后续真解析出 feature 时第 138 行 put 真值覆盖
+        // (Map.put 后写赢); 解析为 null 时保持空串, feature_resolve 的 isBlank() 判定会让它
+        // 重新自己解析 ("滑块底座" → FeatureNameMatcher 未命中 → null → 走 fallback, 不再被污染).
+        //
+        // 用空串而非 null: 与 CACHE_HIT_KEY 同理, 避开 Graph 1.1.2 对 Optional.of(null) 的未验证行为,
+        // 且 feature_resolve / 下游消费方均已用 isBlank() 判空, 语义对齐.
+        partial.put(GraphStateKeys.MATCHED_FEATURE, "");
+
         // 总开关
         if (!properties.isEnabled()) {
             appendPhaseLog(state, partial, "[" + NODE_ID + "] disabled, skip");

@@ -333,6 +333,83 @@ public class GraphMetricsCollector {
         }
     }
 
+    /**
+     * 记录一次 Self-RAG 自反思裁决 (最后一刀). 由 KnowledgeAnswerNode 在每次知识问答收尾时调用.
+     *
+     * <p><b>verdict 取值 (受控有限集, 7 个, 基数安全)</b>:
+     * <ul>
+     *   <li>{@code DISABLED}              - self-rag 关闭, 单版同步生成</li>
+     *   <li>{@code PASS}                  - 第1版三维全过, 直接采纳 (收敛优化命中)</li>
+     *   <li>{@code RETRY_GEN_WIN_A/B}     - 召回对但生成不佳, 重生成第2版后择优 (选 A=第1版/B=第2版)</li>
+     *   <li>{@code RETRY_RETRIEVE_WIN_A/B}- 召回不对路, 重检索+重生成后择优</li>
+     *   <li>{@code GIVE_UP}               - 两版都不合格 (假问题), 返回兜底话术</li>
+     * </ul>
+     *
+     * <p><b>这是"回答质量"的核心量化维度</b>:
+     * <ul>
+     *   <li>PASS 占比高 = 一次生成质量好; RETRY_* 占比 = 自反思的实际触发率与纠正效果</li>
+     *   <li>WIN_B 占比 = 第2版战胜第1版的比例, 直接反映 Self-RAG 带来的质量提升幅度</li>
+     *   <li>GIVE_UP 占比 = 假问题/知识盲区的暴露率, 指引知识库补充方向</li>
+     * </ul>
+     * 简历可写: "通过自反思裁决埋点量化 how-to 类回答的重生成纠正率 / 第2版胜出率"。</p>
+     *
+     * <p>故意只用 {@code verdict} 一个标签, 不带 feature_name/intent (高基数);
+     * 需要按 feature 下钻时走 SQL 直查 (与 B6 缓存指标的热/冷路径分离设计一致)。</p>
+     *
+     * @param verdict 裁决标签 (见上); null/空兜底为 "unknown"
+     */
+    public void recordReflectVerdict(String verdict) {
+        try {
+            Counter.builder("agent_reflect_verdict_total")
+                    .description("Self-RAG 自反思裁决分布 (PASS/RETRY_*/GIVE_UP/DISABLED)")
+                    .tag("verdict", safeTag(verdict == null || verdict.isBlank() ? "unknown" : verdict))
+                    .register(meterRegistry)
+                    .increment();
+        } catch (Exception e) {
+            log.warn("[GraphMetricsCollector] recordReflectVerdict failed verdict={}", verdict, e);
+        }
+    }
+
+    /**
+     * 记录一次 Self-RAG judge LLM 调用耗时 (最后一刀, 思路B: 量化自反思延迟增量).
+     *
+     * <p>由 {@link com.wzh.service.selfrag.SelfRagEvaluator} 在每次 judge / compare 调用收尾时记录。
+     * 与 {@code node_name="knowledge_answer"} 的节点 P95 配合解读:
+     * <ul>
+     *   <li>knowledge_answer 节点 P95 = 用户感受到的端到端知识问答耗时 (含生成+自反思)</li>
+     *   <li>本指标 = 自反思中 <b>单次 judge LLM 调用</b> 的纯耗时, phase 标签区分 judge/compare</li>
+     * </ul>
+     * 两者相减可估算"自反思相对纯生成引入了多少延迟", 直接回答"你这 Self-RAG 加了多少延迟"。
+     * 简历可写: "可观测性精确到自反思 judge 的延迟分位数, 量化质量增强的延迟成本"。</p>
+     *
+     * <p>phase 标签受控 (judge / compare 两值), 基数安全。</p>
+     *
+     * @param phase  "judge" (单版三维诊断) / "compare" (两版 pairwise 对比)
+     * @param costMs judge LLM 调用耗时 (毫秒)
+     */
+    public void recordReflectLatency(String phase, long costMs) {
+        try {
+            Timer.builder("agent_reflect_latency_seconds")
+                    .description("Self-RAG judge LLM 调用耗时分布, 按 judge/compare 拆分")
+                    .tag("phase", safeTag(phase == null || phase.isBlank() ? "unknown" : phase))
+                    .publishPercentileHistogram()
+                    .serviceLevelObjectives(
+                            Duration.ofMillis(250),
+                            Duration.ofMillis(500),
+                            Duration.ofSeconds(1),
+                            Duration.ofSeconds(2),
+                            Duration.ofSeconds(3),
+                            Duration.ofSeconds(5),
+                            Duration.ofSeconds(8),
+                            Duration.ofSeconds(15))
+                    .register(meterRegistry)
+                    .record(Duration.ofMillis(costMs));
+        } catch (Exception e) {
+            log.warn("[GraphMetricsCollector] recordReflectLatency failed phase={} costMs={}",
+                    phase, costMs, e);
+        }
+    }
+
     // ==================== 内部 ====================
 
     /**
@@ -363,6 +440,8 @@ public class GraphMetricsCollector {
         public static final String IMAGE_USER_SCREENSHOT = "image_user_screenshot";
         /** 文档学习场景的图像分析 (ImageUnderstandingService.analyzeImage → qwen-vl-max), 不在对话主链路. */
         public static final String IMAGE_DOC_LEARN = "image_doc_learn";
+        /** Self-RAG 自反思判别 (SelfRagEvaluator → DashScopeService.chatOnce → qwen-plus), 含单版三维诊断 + 两版对比. */
+        public static final String SELF_REFLECT_JUDGE = "self_reflect_judge";
 
         private MetricScene() {}
     }

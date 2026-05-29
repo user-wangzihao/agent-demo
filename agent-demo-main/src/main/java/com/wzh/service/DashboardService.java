@@ -158,6 +158,35 @@ public class DashboardService {
         builder.cacheMissCount(miss);
         builder.cacheHitRate(cacheHitRate);
 
+        // ==================== 卡 7: Self-RAG 自反思 (最后一刀) ====================
+        // verdict 分布按标签分组查一次, 后端组装出 一次过/纠正/第2版胜出/假问题 四个率.
+        // 故意不在 PromQL 里算复合率 (分子分母跨多个 verdict 组), 拿原始计数后端算更清晰.
+        Map<String, Double> byVerdict = prometheus.queryGrouped(
+                "sum by (verdict) (increase(agent_reflect_verdict_total[24h]))",
+                "verdict");
+        double pass = verdictVal(byVerdict, "PASS");
+        double retryGenA = verdictVal(byVerdict, "RETRY_GEN_WIN_A");
+        double retryGenB = verdictVal(byVerdict, "RETRY_GEN_WIN_B");
+        double retryRetA = verdictVal(byVerdict, "RETRY_RETRIEVE_WIN_A");
+        double retryRetB = verdictVal(byVerdict, "RETRY_RETRIEVE_WIN_B");
+        double giveUp = verdictVal(byVerdict, "GIVE_UP");
+        double retrySum = retryGenA + retryGenB + retryRetA + retryRetB;
+        double winBSum = retryGenB + retryRetB;
+        // 分母不含 DISABLED (那是关闭自反思的轮次, 不算"经过评估")
+        double reflectTotal = pass + retrySum + giveUp;
+
+        builder.reflectTotalCount((long) reflectTotal);
+        builder.reflectPassRate(reflectTotal == 0 ? 0.0 : round2(pass * 100.0 / reflectTotal));
+        builder.reflectRetryRate(reflectTotal == 0 ? 0.0 : round2(retrySum * 100.0 / reflectTotal));
+        builder.reflectV2WinRate(retrySum == 0 ? 0.0 : round2(winBSum * 100.0 / retrySum));
+        builder.reflectGiveUpRate(reflectTotal == 0 ? 0.0 : round2(giveUp * 100.0 / reflectTotal));
+
+        // judge 调用延迟 P50/P95 (phase=judge, 与端到端 P95 配合看自反思延迟成本)
+        builder.reflectJudgeLatencyP50Ms(promToMillis(prometheus.queryScalar(
+                "histogram_quantile(0.50, sum by (le) (increase(agent_reflect_latency_seconds_bucket{phase=\"judge\"}[24h])))")));
+        builder.reflectJudgeLatencyP95Ms(promToMillis(prometheus.queryScalar(
+                "histogram_quantile(0.95, sum by (le) (increase(agent_reflect_latency_seconds_bucket{phase=\"judge\"}[24h])))")));
+
         long promMs = System.currentTimeMillis() - promStart;
         debug.put("prometheus", promMs);
         debug.put("total", System.currentTimeMillis() - start);
@@ -217,5 +246,11 @@ public class DashboardService {
     private double round2(double v) {
         if (Double.isNaN(v) || Double.isInfinite(v)) return 0.0;
         return Math.round(v * 100.0) / 100.0;
+    }
+
+    /** 安全取 verdict 分组计数, 缺失/null 返回 0. */
+    private double verdictVal(Map<String, Double> byVerdict, String verdict) {
+        Double v = byVerdict.get(verdict);
+        return v == null || v.isNaN() ? 0.0 : v;
     }
 }

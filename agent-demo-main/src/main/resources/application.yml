@@ -350,3 +350,11 @@ semantic-cache:
   feedback-weight-regenerate: 1      # 重新生成权重
   feedback-weight-ticket: 3          # 提交工单权重
   milvus-collection: semantic_cache_vectors
+
+self-rag:
+  enabled: true
+  judge-model: qwen-plus
+  judge-temperature: 0.1          # judge 要确定性,低温
+  judge-max-tokens: 400
+  judge-timeout-ms: 8000
+  give-up-fallback: "抱歉, 根据现有知识库, 我没有找到与您问题直接相关的可靠信息。您可以尝试换个说法描述问题, 或提交工单由人工为您跟进。"

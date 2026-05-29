@@ -126,6 +126,50 @@ public class KpiSnapshot {
      */
     private long cacheMissCount;
 
+    // ==================== 卡 7: Self-RAG 自反思 (最后一刀, 来自 Prometheus) ====================
+
+    /**
+     * 24h 自反思总次数 (= 所有 verdict 计数之和, 不含 DISABLED).
+     * 即真正经过 Self-RAG 评估的知识问答轮次. 作分母与基数展示.
+     */
+    private long reflectTotalCount;
+
+    /**
+     * 一次过率 (24h, 0-100 百分比) = PASS / reflectTotalCount * 100.
+     * 高 = 第1版生成质量好, 多数问题无需重生成; 反映基础 RAG 质量.
+     */
+    private double reflectPassRate;
+
+    /**
+     * 自反思纠正率 (24h, 0-100 百分比) = (所有 RETRY_* 之和) / reflectTotalCount * 100.
+     * 即多少比例的问题触发了"生成第2版"重生成. 反映 Self-RAG 的实际介入频率.
+     */
+    private double reflectRetryRate;
+
+    /**
+     * 第2版胜出率 (24h, 0-100 百分比) = (所有 *_WIN_B 之和) / (所有 RETRY_* 之和) * 100.
+     * 即触发重生成后, 第2版战胜第1版被采纳的比例. <b>直接量化 Self-RAG 带来的质量提升幅度</b>.
+     * RETRY_* 为 0 时返回 0.
+     */
+    private double reflectV2WinRate;
+
+    /**
+     * 假问题率 (24h, 0-100 百分比) = GIVE_UP / reflectTotalCount * 100.
+     * 即两版都不合格、返回兜底话术的比例. 反映知识盲区暴露率, 指引知识库补充方向.
+     */
+    private double reflectGiveUpRate;
+
+    /**
+     * 自反思 judge 调用耗时 P50 (毫秒, phase=judge, 24h).
+     * 与 graphLatencyP95Ms (端到端) 配合解读, 量化自反思引入的延迟成本.
+     */
+    private long reflectJudgeLatencyP50Ms;
+
+    /**
+     * 自反思 judge 调用耗时 P95 (毫秒, phase=judge, 24h).
+     */
+    private long reflectJudgeLatencyP95Ms;
+
     // ==================== 元数据 ====================
 
     /** 本次快照生成时刻 (服务端时间). 前端可据此显示"上次更新于 X 秒前". */

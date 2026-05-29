@@ -158,6 +158,35 @@ public final class GraphStateKeys {
      */
     public static final String IS_TICKET_RESPONSE = "isTicketResponse";
 
+    // ========================================================================
+    // Self-RAG 自反思 (最后一刀)
+    // ========================================================================
+
+    /**
+     * Self-RAG: 跳过语义缓存写入标记 (Boolean).
+     *
+     * <p><b>由 KnowledgeAnswerNode 写入</b>: 当 Self-RAG 判定两版答案都不合格 (假问题,
+     * winner_acceptable=false), FINAL_ANSWER 被置为兜底话术, 同时本字段 put true。</p>
+     *
+     * <p><b>由 Controller handleDone 读取</b>: cache-write 判定加 {@code !selfRagSkipCache} 条件,
+     * 兜底话术("没找到相关信息")绝不写入缓存 — 否则下次同 query 命中会把"没找到"固化返回,
+     * 与 B4 失效策略、命中即"已 PASS 答案"的缓存语义直接冲突。</p>
+     *
+     * <p><b>状态残留铁律</b>: 本字段被 Controller 读, KnowledgeAnswerNode 所有出口分支
+     * (PASS / 择优采纳 / 假问题兜底) 必须无条件显式 put (默认 false), 不依赖"不 put=默认空"。
+     * 同 B3-c CacheCheckNode / Batch1 phaseLog 的教训。</p>
+     */
+    public static final String SELF_RAG_SKIP_CACHE = "selfRagSkipCache";
+
+    /**
+     * Self-RAG: 自评裁决结果 (String, 取 SelfRagJudgement.Verdict 名 / "DISABLED" / "GIVE_UP" 等).
+     *
+     * <p>仅用于可观测性与日志 (大屏 self_reflect 维度统计、面试 debug), 不参与路由。
+     * 由 KnowledgeAnswerNode 写入, 取值: DISABLED / PASS / RETRY_GEN_WIN_A / RETRY_GEN_WIN_B /
+     * RETRY_RETRIEVE_WIN_A / RETRY_RETRIEVE_WIN_B / GIVE_UP。</p>
+     */
+    public static final String SELF_RAG_VERDICT = "selfRagVerdict";
+
     private GraphStateKeys() {
         // 禁止实例化
     }
